@@ -4,6 +4,8 @@
 # This source code is licensed under the license found in the
 # NOTICE FILE in the root directory of this source tree.
 #
+# Dataloaders for MILD dataset
+#
 
 from logging import getLogger
 import math
@@ -267,10 +269,13 @@ class MILDRetrievalDataset(Dataset):
 
         self.en_len = 110000
         self.ft_lg = params.ft_lgs[0]  # only use one
+        _local_rank = params.local_rank
+        _select_lg = _local_rank % len(params.ft_lgs)
+        self.ft_lg = params.ft_lgs[_select_lg]
         #whether fintune on all
         self.is_ft_all= False
-        if len(params.ft_lgs)>1:
-            self.is_ft_all = True
+        #if len(params.ft_lgs)>1:
+        #    self.is_ft_all = True
         assert data_type in ['mild']
         if data_type == 'mild':
             # open the hdf5 file for image features
@@ -311,7 +316,7 @@ class MILDRetrievalDataset(Dataset):
             img_id = int(img_id)
             cur_cap_list = []
             if len(self.ft_lgs)>0:
-                for lg in self.ft_lgs:
+                for lg in [self.ft_lg]:
                     if img_id not in self.captions[lg]:
                         continue
                     for cap in self.captions[lg][img_id]:
