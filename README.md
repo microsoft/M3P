@@ -8,13 +8,25 @@ This repo provides the code of [M3P](https://arxiv.org/pdf/2006.02635.pdf), a Mu
 # Install and Dependency
 
 Python 3
+
 NumPy
+
 PyTorch (version 1.2+)
+
 fastBPE (for BPE codes)
-sentencepiece (for tokenization)
+
 Apex (for fp16 training)
 
+SentencePiece provides Python wrapper that supports both SentencePiece training and segmentation. You can install Python binary package of SentencePiece with.
+
+% pip install sentencepiece
+
 # Data Ready
+
+##Multi30K
+
+##MSCOCO
+
 
 # Pre-trained Models
 
