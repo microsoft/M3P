@@ -27,6 +27,9 @@ SentencePiece provides Python wrapper that supports both SentencePiece training 
 
 ##MSCOCO
 
+COCO -zh http://lixirong.net/data/coco-cn/coco-cn-version1805v1.1.tar.gz
+COCO -ja https://github.com/STAIR-Lab-CIT/STAIR-captions
+
 
 # Pre-trained Models
 
@@ -115,25 +118,74 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --data_path $DATA_PATH \
     --vocab_path $VOCAB_PATH \
     --mild_path $MILD_PATH \
-    --cross_rel_steps 'mild-img' \
+    --cross_modal_steps 'flicker-img' \
     --epoch_size 100000 \
-    --max_epoch 10 \
+    --max_epoch 25 \
     --max_len 128 \
     --accumulate_gradients 8 \
     --input_fea_dir $FEA_PATH \
-    --is_understanding True \
+    --is_generation True \
     --num_workers 4 \
     --eval_path $EVAL_PATH \
     --ft_lgs $LG \
     --eval_only False \
-    --is_mild True \
-    --qp_type 'qp' \
-    --seq_per_img 1 \
+    --beam_size 10 \
+```      
+
+```
+python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_path $DATA_PATH \
+    --reload_model $RELOAD \
+    --dump_path $MODELS \
+    --exp_name $EXP_NAME \
+    --batch_size 32 \
+    --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
+    --lgs $ALL_LGS \
+    --data_path $DATA_PATH \
+    --vocab_path $VOCAB_PATH \
+    --mild_path $MILD_PATH \
+    --cross_modal_steps 'coco-img' \
+    --epoch_size 100000 \
+    --max_epoch 25 \
+    --max_len 128 \
+    --accumulate_gradients 4 \
+    --input_fea_dir $FEA_PATH \
+    --is_generation True \
+    --num_workers 4 \
+    --eval_path $EVAL_PATH \
+    --ft_lgs $LG \
+    --eval_only False \
+    --beam_size 10 \
 ```      
 
 ## Multimodal machine translation
 
 The task of multimodal machine translation is to generate sentences in target languages given source sentences together with related images as complementary information. We evaluate M3P on Multi30K. 
+
+```
+python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_path $DATA_PATH \
+    --reload_model $RELOAD \
+    --dump_path $MODELS \
+    --exp_name $EXP_NAME \
+    --batch_size 24 \
+    --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
+    --lgs $ALL_LGS \
+    --data_path $DATA_PATH \
+    --vocab_path $VOCAB_PATH \
+    --mild_path $MILD_PATH \
+    --cross_modal_steps 'flicker-img' \
+    --epoch_size 100000 \
+    --max_epoch 25 \
+    --max_len 128 \
+    --accumulate_gradients 8 \
+    --input_fea_dir $FEA_PATH \
+    --is_generation True \
+    --num_workers 4 \
+    --eval_path $EVAL_PATH \
+    --ft_lgs 'en-de' \
+    --eval_only False \
+    --beam_size 10 \
+    --is_mt True \
+```      
 
 # How to cite
 
