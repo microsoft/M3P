@@ -25,6 +25,10 @@ SentencePiece provides Python wrapper that supports both SentencePiece training 
 
 ##Multi30K
 
+In order to fetch everything correctly, you need to clone the repository with --recursive flag:
+
+$ git clone --recursive https://github.com/multi30k/dataset.git multi30k-dataset
+
 ##MSCOCO
 
 COCO -zh http://lixirong.net/data/coco-cn/coco-cn-version1805v1.1.tar.gz
