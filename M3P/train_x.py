@@ -54,13 +54,13 @@ def get_parser():
                         help="Only use english domain (equal to only use one language)")
 
     # model parameters
-    parser.add_argument("--emb_dim", type=int, default=1024,
+    parser.add_argument("--emb_dim", type=int, default=768,
                         help="Embedding layer size")
     parser.add_argument("--n_layers", type=int, default=12,
                         help="Number of Transformer layers")
     parser.add_argument("--n_dec_layers", type=int, default=-1,
                         help="Number of Decoder Transformer layers")
-    parser.add_argument("--n_heads", type=int, default=8,
+    parser.add_argument("--n_heads", type=int, default=12,
                         help="Number of Transformer heads")
     parser.add_argument("--dropout", type=float, default=0.1,
                         help="Dropout")
@@ -145,7 +145,7 @@ def get_parser():
                         help="Sequence length")
     parser.add_argument("--min_len", type=int, default=2,
                         help="Minimum length of sentences (after BPE)")
-    parser.add_argument("--max_len", type=int, default=60,
+    parser.add_argument("--max_len", type=int, default=128,
                         help="Maximum length of sentences (after BPE)")
     parser.add_argument("--group_by_size", type=bool_flag, default=True,
                         help="Sort sentences by size during the training")
@@ -311,7 +311,7 @@ def get_parser():
                         help="If use encoder-decoder framework for understanding tasks")
 
 
-    parser.add_argument("--save_every_epoch", type=int, default=1,
+    parser.add_argument("--save_every_epoch", type=int, default=5,
                         help="how many epoches for saving")
 
     parser.add_argument("--multi_reload_model", type=str,
@@ -320,9 +320,9 @@ def get_parser():
 
     parser.add_argument("--bin_cls_loss_weight", type=float, default=1,
                         help="the weight of binary classification loss when  finetining")
-    parser.add_argument("--multi_cls_loss_weight", type=float, default=1,
+    parser.add_argument("--multi_cls_loss_weight", type=float, default=0,
                         help="the weight of multiple classification loss when finetining")
-    parser.add_argument("--sample_n", type=int, default=2,
+    parser.add_argument("--sample_n", type=int, default=4,
                         help="number of samples during retrieval")
     parser.add_argument("--t2i_flag", type=bool_flag, default=True,
                         help="whether sample text 2 image")
@@ -331,7 +331,7 @@ def get_parser():
     parser.add_argument("--coco_method", type=str,
                         default="CIDEr",
                         help="which evaluation metric selection for coco evaluate")
-    parser.add_argument("--eval_n", type=int, default=150,
+    parser.add_argument("--eval_n", type=int, default=100,
                         help="n_sentences for evaluation,including retrieval and generation")
     parser.add_argument("--eval_images", type=int, default=-1,
                         help="n_images for evaluation retrieval")
