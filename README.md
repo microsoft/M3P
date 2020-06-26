@@ -28,6 +28,7 @@ SentencePiece provides Python wrapper that supports both SentencePiece training 
 ##MSCOCO
 
 COCO -zh http://lixirong.net/data/coco-cn/coco-cn-version1805v1.1.tar.gz
+
 COCO -ja https://github.com/STAIR-Lab-CIT/STAIR-captions
 
 
@@ -68,7 +69,7 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --is_understanding True \
     --num_workers 4 \
     --eval_path $EVAL_PATH \
-    --ft_lgs $LG \
+    --ft_lgs 'en' \
     --eval_only False \
     --is_mild True \
     --qp_type 'q' \
@@ -96,7 +97,7 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --is_understanding True \
     --num_workers 4 \
     --eval_path $EVAL_PATH \
-    --ft_lgs $LG \
+    --ft_lgs 'en' \
     --eval_only False \
     --is_mild True \
     --qp_type 'qp' \
