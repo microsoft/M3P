@@ -51,39 +51,21 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --dump_path $MODELS \
     --exp_name $EXP_NAME \
     --batch_size 24 \
-    --emb_dim 768 \
-    --n_layers 12 \
-    --n_heads 12 \
-    --dropout 0.1 \
-    --attention_dropout 0.1 \
-    --gelu_activation True \
     --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
     --lgs $ALL_LGS \
     --data_path $DATA_PATH \
     --vocab_path $VOCAB_PATH \
-    --mild_path '/multimedia-nfs/lins/data/QPI' \
+    --mild_path $MILD_PATH \
     --cross_rel_steps 'mild-img' \
     --epoch_size 100000 \
     --max_epoch 10 \
-    --bptt 128 \
     --max_len 128 \
-    --fp16 True \
-    --validation_metrics valid_I2T_acc,valid_T2I_acc \
-    --max_region_num 100 \
     --accumulate_gradients 8 \
-    --amp 1 \
     --input_fea_dir $FEA_PATH \
-    --is_cross_modal True \
-    --save_every_epoch 5 \
     --is_understanding True \
-    --eval_n 50 \
-    --eval_images -1 \
-    --sample_n 4 \
-    --multi_cls_loss_weight 0 \
-    --bin_cls_loss_weight 1 \
     --num_workers 4 \
     --eval_path $EVAL_PATH \
-    --ft_lgs 'en' \
+    --ft_lgs $LG \
     --eval_only False \
     --is_mild True \
     --qp_type 'q' \
@@ -97,42 +79,21 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --dump_path $MODELS \
     --exp_name $EXP_NAME \
     --batch_size 24 \
-    --emb_dim 768 \
-    --n_layers 12 \
-    --n_heads 12 \
-    --n_dec_layers -1 \
-    --dropout 0.1 \
-    --attention_dropout 0.1 \
-    --gelu_activation True \
     --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
     --lgs $ALL_LGS \
     --data_path $DATA_PATH \
     --vocab_path $VOCAB_PATH \
-    --mild_path '/multimedia-nfs/lins/data/QPI' \
+    --mild_path $MILD_PATH \
     --cross_rel_steps 'mild-img' \
     --epoch_size 100000 \
     --max_epoch 10 \
-    --bptt 128 \
     --max_len 128 \
-    --fp16 True \
-    --validation_metrics valid_I2T_acc,valid_T2I_acc \
-    --max_region_num 100 \
     --accumulate_gradients 8 \
-    --amp 1 \
-    --refine_image False \
-    --refine_encoder False \
     --input_fea_dir $FEA_PATH \
-    --is_cross_modal True \
-    --save_every_epoch 5 \
     --is_understanding True \
-    --eval_n 50 \
-    --eval_images -1 \
-    --sample_n 4 \
-    --multi_cls_loss_weight 0 \
-    --bin_cls_loss_weight 1 \
     --num_workers 4 \
     --eval_path $EVAL_PATH \
-    --ft_lgs 'en' \
+    --ft_lgs $LG \
     --eval_only False \
     --is_mild True \
     --qp_type 'qp' \
@@ -142,6 +103,33 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
 ## Multilingual image captioning
 
 The task of multilingual image captioning is to generate captions in specific languages given input images. We evaluate M3P on Multi30K and MSCOCO.
+
+```
+python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_path $DATA_PATH \
+    --reload_model $RELOAD \
+    --dump_path $MODELS \
+    --exp_name $EXP_NAME \
+    --batch_size 24 \
+    --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
+    --lgs $ALL_LGS \
+    --data_path $DATA_PATH \
+    --vocab_path $VOCAB_PATH \
+    --mild_path $MILD_PATH \
+    --cross_rel_steps 'mild-img' \
+    --epoch_size 100000 \
+    --max_epoch 10 \
+    --max_len 128 \
+    --accumulate_gradients 8 \
+    --input_fea_dir $FEA_PATH \
+    --is_understanding True \
+    --num_workers 4 \
+    --eval_path $EVAL_PATH \
+    --ft_lgs $LG \
+    --eval_only False \
+    --is_mild True \
+    --qp_type 'qp' \
+    --seq_per_img 1 \
+```      
 
 ## Multimodal machine translation
 
