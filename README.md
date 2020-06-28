@@ -23,7 +23,7 @@ sacrebleu (for generation evaluation)
 
 # Data Ready
 
-We evaluate M3P on Multi30K [28, 29], MSCOCO [16, 30, 31, 34] and MILD. MILD will be released later.
+We use theses as our finetuning dataset: Multi30K [28, 29], MSCOCO [16, 30, 31, 34] and MILD. MILD will be released later.
 
 ## Feature Extraction
 
