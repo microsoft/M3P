@@ -17,15 +17,13 @@ fastBPE (for BPE codes)
 
 Apex (for fp16 training)
 
-SentencePiece provides Python wrapper that supports both SentencePiece training and segmentation. You can install Python binary package of SentencePiece with.
-
-% pip install sentencepiece
+SentencePiece
 
 # Data Ready
 
 ## Multi30K
 
-In order to fetch everything correctly, you need to clone the repository with --recursive flag:
+In order to fetch mutli30k data correctly, you can clone the repository with --recursive flag:
 
 $ git clone --recursive https://github.com/multi30k/dataset.git multi30k-dataset
 
@@ -34,6 +32,10 @@ $ git clone --recursive https://github.com/multi30k/dataset.git multi30k-dataset
 COCO -zh http://lixirong.net/data/coco-cn/coco-cn-version1805v1.1.tar.gz
 
 COCO -ja https://github.com/STAIR-Lab-CIT/STAIR-captions
+
+## Feature Extraction
+
+## Meta-data collation
 
 
 # Pre-trained Models
