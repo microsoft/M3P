@@ -23,13 +23,13 @@ SentencePiece provides Python wrapper that supports both SentencePiece training 
 
 # Data Ready
 
-##Multi30K
+## Multi30K
 
 In order to fetch everything correctly, you need to clone the repository with --recursive flag:
 
 $ git clone --recursive https://github.com/multi30k/dataset.git multi30k-dataset
 
-##MSCOCO
+## MSCOCO
 
 COCO -zh http://lixirong.net/data/coco-cn/coco-cn-version1805v1.1.tar.gz
 
@@ -43,7 +43,24 @@ COCO -ja https://github.com/STAIR-Lab-CIT/STAIR-captions
 | Understanding   | [MODEL](https://unicoderrelease.blob.core.windows.net/m3p/m3p_under_weights.tar.gz)    |
 | Generiation   | [MODEL](https://unicoderrelease.blob.core.windows.net/m3p/m3p_gen_weights.tar.gz)    |
 
+Same with XLM-R, XLM-R handles the following 100 languages: Afrikaans, Albanian, Amharic, Arabic, Armenian, Assamese, Azerbaijani, Basque, Belarusian, Bengali, Bengali Romanized, Bosnian, Breton, Bulgarian, Burmese, Burmese, Catalan, Chinese (Simplified), Chinese (Traditional), Croatian, Czech, Danish, Dutch, English, Esperanto, Estonian, Filipino, Finnish, French, Galician, Georgian, German, Greek, Gujarati, Hausa, Hebrew, Hindi, Hindi Romanized, Hungarian, Icelandic, Indonesian, Irish, Italian, Japanese, Javanese, Kannada, Kazakh, Khmer, Korean, Kurdish (Kurmanji), Kyrgyz, Lao, Latin, Latvian, Lithuanian, Macedonian, Malagasy, Malay, Malayalam, Marathi, Mongolian, Nepali, Norwegian, Oriya, Oromo, Pashto, Persian, Polish, Portuguese, Punjabi, Romanian, Russian, Sanskri, Scottish, Gaelic, Serbian, Sindhi, Sinhala, Slovak, Slovenian, Somali, Spanish, Sundanese, Swahili, Swedish, Tamil, Tamil Romanized, Telugu, Telugu Romanized, Thai, Turkish, Ukrainian, Urdu, Urdu Romanized, Uyghur, Uzbek, Vietnamese, Welsh, Western, Frisian, Xhosa, Yiddish.
+
 # Downstream tasks
+
+In this section, we will introduce how to fine-tune the pre-trained models on different downstream tasks.
+Below notations apply to all commands:
+
+```
+$NGPU: number of GPUs used for fine-tuning
+$DATA_PATH: path to the image caption files
+$RELOAD: path to the pre-trained model
+$EXP_NAME: name your experiment
+$MODELS: path to store models
+$VOCAB_PATH: path to the vocab file
+$FEA_PATH: path to the image features
+$MILD_PATH: subdirectory of the image features for MILD dataset
+$EVAL_PATH: path to save evaluation results
+```
 
 ## Multilingual image-text retrieval
 
@@ -51,7 +68,9 @@ The task of multilingual image-text retrieval is to find the most relevant image
 
 On MILD benchmark we fine-tune M3P with two settings.
 
-### Fine-tune on Q-I pairs without using image contexts (taking fine-tune on English as an example):
+### Fine-tune on Q-I pairs
+
+This is to fine-tune pre-trained understanding model without using image contexts (taking fine-tune on English as an example):
 
 ```
 python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_path $DATA_PATH \
@@ -60,7 +79,6 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --exp_name $EXP_NAME \
     --batch_size 24 \
     --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
-    --lgs $ALL_LGS \
     --data_path $DATA_PATH \
     --vocab_path $VOCAB_PATH \
     --mild_path $MILD_PATH \
@@ -79,7 +97,9 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --qp_type 'q' \
     --seq_per_img 1 \
 ```
-### Fine-tune based on Q-I-C triples, where each image and its context always appear together as input (taking fine-tune on English as an example):
+### Fine-tune based on Q-I-C triples
+
+This is to fine-tune pre-trained understanding model where each image and its context always appear together as input (taking fine-tune on English as an example):
 
 ```
 python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_path $DATA_PATH \
@@ -88,7 +108,6 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --exp_name $EXP_NAME \
     --batch_size 24 \
     --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
-    --lgs $ALL_LGS \
     --data_path $DATA_PATH \
     --vocab_path $VOCAB_PATH \
     --mild_path $MILD_PATH \
@@ -119,7 +138,6 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --exp_name $EXP_NAME \
     --batch_size 24 \
     --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
-    --lgs $ALL_LGS \
     --data_path $DATA_PATH \
     --vocab_path $VOCAB_PATH \
     --mild_path $MILD_PATH \
@@ -144,7 +162,6 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --exp_name $EXP_NAME \
     --batch_size 32 \
     --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
-    --lgs $ALL_LGS \
     --data_path $DATA_PATH \
     --vocab_path $VOCAB_PATH \
     --mild_path $MILD_PATH \
@@ -173,7 +190,6 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --exp_name $EXP_NAME \
     --batch_size 24 \
     --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
-    --lgs $ALL_LGS \
     --data_path $DATA_PATH \
     --vocab_path $VOCAB_PATH \
     --mild_path $MILD_PATH \
