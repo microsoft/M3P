@@ -66,9 +66,63 @@ $EVAL_PATH: path to save evaluation results
 
 The task of multilingual image-text retrieval is to find the most relevant images given input texts in different languages, or vice versa. We evaluate M3P on Multi30K, MSCOCO and MILD.
 
-On MILD benchmark we fine-tune M3P with two settings.
+### Fine-tune MSCOCO
 
-### Fine-tune on Q-I pairs
+This is to fine-tune pre-trained understanding model on MSCOCO (taking fine-tune on English as an example):
+
+```
+python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_path $DATA_PATH \
+    --reload_model $RELOAD \
+    --dump_path $MODELS \
+    --exp_name $EXP_NAME \
+    --batch_size 24 \
+    --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
+    --data_path $DATA_PATH \
+    --vocab_path $VOCAB_PATH \
+    --mild_path $MILD_PATH \
+    --cross_rel_steps 'coco' \
+    --epoch_size 100000 \
+    --max_epoch 10 \
+    --max_len 128 \
+    --accumulate_gradients 8 \
+    --input_fea_dir $FEA_PATH \
+    --is_understanding True \
+    --num_workers 4 \
+    --eval_path $EVAL_PATH \
+    --ft_lgs 'en' \
+    --eval_only False \
+```
+
+### Fine-tune Flickr Multi30K
+
+This is to fine-tune pre-trained understanding model on Flickr Multi30K (taking fine-tune on English as an example):
+
+```
+python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_path $DATA_PATH \
+    --reload_model $RELOAD \
+    --dump_path $MODELS \
+    --exp_name $EXP_NAME \
+    --batch_size 24 \
+    --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
+    --data_path $DATA_PATH \
+    --vocab_path $VOCAB_PATH \
+    --mild_path $MILD_PATH \
+    --cross_rel_steps 'flicker' \
+    --epoch_size 100000 \
+    --max_epoch 10 \
+    --max_len 128 \
+    --accumulate_gradients 8 \
+    --input_fea_dir $FEA_PATH \
+    --is_understanding True \
+    --num_workers 4 \
+    --eval_path $EVAL_PATH \
+    --ft_lgs 'en' \
+    --eval_only False \
+```
+
+On MILD benchmark we fine-tune M3P with below two settings.
+
+### Fine-tune MILD based on Q-I pairs
 
 This is to fine-tune pre-trained understanding model without using image contexts (taking fine-tune on English as an example):
 
@@ -97,7 +151,7 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --qp_type 'q' \
     --seq_per_img 1 \
 ```
-### Fine-tune based on Q-I-C triples
+### Fine-tune MILD based on Q-I-C triples
 
 This is to fine-tune pre-trained understanding model where each image and its context always appear together as input (taking fine-tune on English as an example):
 
