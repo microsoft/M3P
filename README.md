@@ -27,7 +27,12 @@ In order to fetch mutli30k data correctly, you can clone the repository with --r
 
 $ git clone --recursive https://github.com/multi30k/dataset.git multi30k-dataset
 
+For multilingual image-text retrieval and multilingual-image-captioning we use raw texts in en and de from task2 and raw texts in fr and cs from task1.
+For multimodal machine translation we use raw texts from task1 to build en-de and en-fr bilingual data.
+
 ## MSCOCO
+
+coco -en https://cocodataset.org/#download
 
 COCO -zh http://lixirong.net/data/coco-cn/coco-cn-version1805v1.1.tar.gz
 
@@ -35,7 +40,26 @@ COCO -ja https://github.com/STAIR-Lab-CIT/STAIR-captions
 
 ## Feature Extraction
 
+We use bottom-up-attention to extract detection features from the image. We use detectron implemented from facebook:
+https://github.com/facebookresearch/mmf/blob/6d89e1dede448682d549fb81d073536a31f88548/tools/scripts/features/extract_features_vmb.py
+
+['bbox', 'captions', 'objects', 'features', 'image_id', 'num_boxes', 'wh'] This feature list is taken as the attribute of h5, which is extracted by the above script.
+
 ## Meta-data collation
+
+For meta-data, we assign each image_id with its raw caption list. We can build a pickle file, the dictionary for image_id and caption like this:
+
+'COCO_train2014_000000010073.jpg': ['A couple of slices of pizza sitting on top of a white plate.',
+  'The pizza is on the dish and ready to be eaten.',
+  'Black olives and cheese pizza slices, with a fork, and sauce in small bowl, all on a plate.',
+  'a white plate a fork and a pizza with black olives',
+  'A plate of pizza with a fork and a bowl.'],
+ 'COCO_train2014_000000349905.jpg': ['a couple of kids and a woman with red hair',
+  'A woman is holding a boy and a girl.',
+  'A smiling woman with two small children in front of a home.',
+  'A women who is holding two children on her lap.',
+  'This mother is happy that her son and daughter like bananas.'],
+  ...
 
 
 # Pre-trained Models
