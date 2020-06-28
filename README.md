@@ -24,17 +24,16 @@ SentencePiece
 ## Multi30K
 
 In order to fetch mutli30k data correctly, you can clone the repository with --recursive flag:
+git clone --recursive https://github.com/multi30k/dataset.git
 
-$ git clone --recursive https://github.com/multi30k/dataset.git multi30k-dataset
-
-For multilingual image-text retrieval and multilingual-image-captioning we use raw texts in en and de from task2 and raw texts in fr and cs from task1.
+*Note:For multilingual image-text retrieval and multilingual-image-captioning we use raw texts in en and de from task2 and raw texts in fr and cs from task1.
 For multimodal machine translation we use raw texts from task1 to build en-de and en-fr bilingual data.
 
 ## MSCOCO
 
-coco -en https://cocodataset.org/#download
+COCO -en https://cocodataset.org/
 
-COCO -zh http://lixirong.net/data/coco-cn/coco-cn-version1805v1.1.tar.gz
+COCO -zh http://lixirong.net/data/coco-cn/
 
 COCO -ja https://github.com/STAIR-Lab-CIT/STAIR-captions
 
@@ -43,11 +42,11 @@ COCO -ja https://github.com/STAIR-Lab-CIT/STAIR-captions
 We use bottom-up-attention to extract detection features from the image. We use detectron implemented from facebook:
 https://github.com/facebookresearch/mmf/blob/6d89e1dede448682d549fb81d073536a31f88548/tools/scripts/features/extract_features_vmb.py
 
-['bbox', 'captions', 'objects', 'features', 'image_id', 'num_boxes', 'wh'] This feature list is taken as the attribute of h5, which is extracted by the above script.
+*Note:['bbox', 'captions', 'objects', 'features', 'image_id', 'num_boxes', 'wh'] This feature list is taken as the attributes of h5 file, which is extracted by the above script. These will be used as training and we use image_file as its image_id.
 
 ## Meta-data collation
 
-For meta-data, we assign each image_id with its raw caption list. We can build a pickle file, the dictionary for image_id and caption like this:
+For meta-data, we assign each image_id with its raw captions. We can build a pickle file, the dictionary for image_id and caption like this:
 
 'COCO_train2014_000000010073.jpg': ['A couple of slices of pizza sitting on top of a white plate.',
   'The pizza is on the dish and ready to be eaten.',
