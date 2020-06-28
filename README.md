@@ -46,7 +46,7 @@ https://github.com/facebookresearch/mmf/blob/6d89e1dede448682d549fb81d073536a31f
 
 ## Meta-data collation
 
-For meta-data, we assign each image_id with its raw captions. We can build a pickle file, the dictionary for image_id and caption like this:
+The meta-data is a pickle file about mapping dictionary for image_id and caption:
 
 'COCO_train2014_000000010073.jpg': ['A couple of slices of pizza sitting on top of a white plate.',
   'The pizza is on the dish and ready to be eaten.',
