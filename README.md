@@ -258,6 +258,8 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --beam_size 10 \
 ```      
 
+For generation evaluation, you can refer to this to modify https://github.com/salaniz/pycocoevalcap
+
 ## Multimodal machine translation
 
 The task of multimodal machine translation is to generate sentences in target languages given source sentences together with related images as complementary information. We evaluate M3P on Multi30K. 
