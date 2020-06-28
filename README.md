@@ -19,25 +19,11 @@ Apex (for fp16 training)
 
 SentencePiece
 
-sacrebleu (for generation evalution)
+sacrebleu (for generation evaluation)
 
 # Data Ready
 
-## Multi30K
-
-In order to fetch mutli30k data correctly, you can clone the repository with --recursive flag:
-git clone --recursive https://github.com/multi30k/dataset.git
-
-*Note:For multilingual image-text retrieval and multilingual-image-captioning we use raw texts in en and de from task2 and raw texts in fr and cs from task1.
-For multimodal machine translation we use raw texts from task1 to build en-de and en-fr bilingual data.
-
-## MSCOCO
-
-COCO -en https://cocodataset.org/
-
-COCO -zh http://lixirong.net/data/coco-cn/
-
-COCO -ja https://github.com/STAIR-Lab-CIT/STAIR-captions
+We evaluate M3P on Multi30K [28, 29], MSCOCO [16, 30, 31, 34] and MILD. MILD will be released later.
 
 ## Feature Extraction
 
