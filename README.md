@@ -23,16 +23,23 @@ sacrebleu (for generation evaluation)
 
 # Data Ready
 
-We use theses as our finetuning dataset: Multi30K [28, 29], MSCOCO [16, 30, 31, 34] and MILD. MILD will be released later.
+Finetuning datasets: Multi30K [28, 29], MSCOCO [16, 30, 31, 34] and MILD. MILD will be released later.
+
+Multi30K extended Flickr30K [32] to German (de), French (fr) and Czech
+(cs). It contains 31,783 images and provides 5 captions per image in English and German and 1 caption per
+image in French and Czech. We use the train, dev, test splits as defined in [32]. MSCOCO contains 123,287
+images and provides 5 captions per image in English, but fewer in Chinese and Japanese. STAIR Captions[33]
+extended MSCOCO [16] with 820K Japanese captions for COCO images. [31] extended MSCOCO [16] with
+Chinese captions for 20K images.
 
 ## Feature Extraction
 
 We use bottom-up-attention to extract detection features from the image. We use detectron implemented from facebook:
 https://github.com/facebookresearch/mmf/blob/6d89e1dede448682d549fb81d073536a31f88548/tools/scripts/features/extract_features_vmb.py
 
-*Note:['bbox', 'captions', 'objects', 'features', 'image_id', 'num_boxes', 'wh'] This feature list is taken as the attributes of h5 file, which is extracted by the above script. The image_id equal to image_file in our project.
+*Note: ['bbox', 'captions', 'objects', 'features', 'image_id', 'num_boxes', 'wh'] This feature list is taken as the attributes of h5 file, which is extracted by the above script. The image_id equal to image_file in our project.
 
-## Meta-data collation
+## Meta-data
 
 The meta-data is a pickle file about mapping dictionary for image_id and caption:
 
