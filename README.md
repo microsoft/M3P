@@ -260,7 +260,7 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --beam_size 10 \
 ```      
 
-For generation evaluation, you can refer to this to modify https://github.com/salaniz/pycocoevalcap or 
+For generation evaluation, you can refer this https://github.com/salaniz/pycocoevalcap or 
 follow scareblue command line :
 ```  
 python -m sacrebleu --force -lc -l lg-lg ref.txt < pred.txt
