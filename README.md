@@ -34,16 +34,22 @@ extended MSCOCO with 820K Japanese captions for COCO images. [31] extended MSCOC
 Reference:
 [28] Desmond Elliott, Stella Frank, Khalil Sima’an, and Lucia Specia. Multi30k: Multilingual english-german
 image descriptions. arXiv preprint arXiv:1605.00459, 2016.
+
 [29] Desmond Elliott, Stella Frank, Loïc Barrault, Fethi Bougares, and Lucia Specia. Findings of the second
 shared task on multimodal machine translation and multilingual image description.
+
 [30] Takashi Miyazaki and Nobuyuki Shimizu. Cross-lingual image caption generation. In ACL, 2016.
+
 [31] Xirong Li, Chaoxi Xu, Xiaoxu Wang, Weiyu Lan, Zhengxiong Jia, Gang Yang, and Jieping Xu. Coco-cn
 for cross-lingual image tagging, captioning and retrieval. In IEEE Transactions on Multimedia, 2019.
+
 [32] Peter Young, Alice Lai, Micah Hodosh, and Julia Hockenmaier. From image descriptions to visual
 denotations: New similarity metrics for semantic inference over event descriptions. Transactions of the
 Association for Computational Linguistics, 2:67–78, 2014.
+
 [33] Yuya Yoshikawa, Yutaro Shigeto, and Akikazu Takeuchi. Stair captions: Constructing a large-scale
 japanese image caption dataset. arXiv preprint arXiv:1705.00823, 2017.
+
 [34] Andrej Karpathy and Li Fei-Fei. Deep visual-semantic alignments for generating image descriptions. In
 Proceedings of the IEEE conference on computer vision and pattern recognition, pages 3128–3137, 2015.
 
