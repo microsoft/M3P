@@ -7,19 +7,13 @@ This repo provides the code of [M3P](https://arxiv.org/pdf/2006.02635.pdf), a Mu
 
 # Install and Dependency
 
-Python 3
-
-NumPy
-
-PyTorch (version 1.2+)
-
-fastBPE (for BPE codes)
-
-Apex (for fp16 training)
-
-SentencePiece
-
-sacrebleu (for generation evaluation)
+- Python 3
+- NumPy
+- PyTorch (version 1.2+)
+- fastBPE (for BPE codes)
+- Apex (for fp16 training)
+- SentencePiece
+- sacrebleu (for generation evaluation)
 
 # Data Ready
 
