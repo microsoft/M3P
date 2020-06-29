@@ -17,7 +17,11 @@ This repo provides the code of [M3P](https://arxiv.org/pdf/2006.02635.pdf), a Mu
 
 # Data Ready
 
-Finetuning datasets: Multi30K [28, 29], MSCOCO [16, 30, 31, 34] and MILD. MILD will be released later.
+Including datasets:
+- [x] Multi30K [28, 29]
+- [x] MSCOCO [16, 30, 31, 34] 
+- [] MILD (*It will be released later.)
+
 
 Multi30K extended Flickr30K [32] to German (de), French (fr) and Czech
 (cs). It contains 31,783 images and provides 5 captions per image in English and German and 1 caption per
@@ -25,6 +29,7 @@ image in French and Czech. We use the train, dev, test splits as defined in [32]
 images and provides 5 captions per image in English, but fewer in Chinese and Japanese. STAIR Captions[33]
 extended MSCOCO with 820K Japanese captions for COCO images. [31] extended MSCOCO with Chinese captions for 20K images.
 
+Head to reference to download the fine-tuning datasets.
 Reference:
 [28] Desmond Elliott, Stella Frank, Khalil Sima’an, and Lucia Specia. Multi30k: Multilingual english-german
 image descriptions. arXiv preprint arXiv:1605.00459, 2016.
@@ -50,14 +55,14 @@ Proceedings of the IEEE conference on computer vision and pattern recognition, p
 
 ## Feature Extraction
 
-We use bottom-up-attention to extract detection features from the image. We use detectron implemented from facebook:
-https://github.com/facebookresearch/mmf/blob/6d89e1dede448682d549fb81d073536a31f88548/tools/scripts/features/extract_features_vmb.py
+We use MMF to extract detection features from the image. MMF is a modular framework for vision and language multimodal research. Built on top of PyTorch:
+[Feature Extraction](https://github.com/facebookresearch/mmf/tree/6d89e1dede448682d549fb81d073536a31f88548)
 
 *Note: ['bbox', 'captions', 'objects', 'features', 'image_id', 'num_boxes', 'wh'] This feature list is taken as the attributes of h5 file, which is extracted by the above script. The image_id equal to image_file in our project.
 
 ## Meta-data
 
-The meta-data is a pickle file about mapping dictionary for image_id and caption:
+The meta-data is a pickle file about mapping dictionary for image_id and caption. This will generate xxx.pkl file:
 
 'COCO_train2014_000000010073.jpg': ['A couple of slices of pizza sitting on top of a white plate.',
   'The pizza is on the dish and ready to be eaten.',
