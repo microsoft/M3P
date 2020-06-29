@@ -18,8 +18,8 @@ This repo provides the code of [M3P](https://arxiv.org/pdf/2006.02635.pdf), a Mu
 # Data Ready
 
 Including datasets:
-- [x] Multi30K [28, 29]
-- [x] MSCOCO [16, 30, 31, 34] 
+- [x] Multi30K 
+- [x] MSCOCO 
 - [ ] MILD (*It will be released later.)
 
 If you use these resources in your research, please consider citing the following papers:
