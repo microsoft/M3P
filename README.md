@@ -28,7 +28,7 @@ If you use these resources in your research, please consider citing the followin
 English and German data:
 
 Reference:
-'''
+```
 @InProceedings{W16-3210,
   author = 	"Elliott, Desmond
 		and Frank, Stella
@@ -43,10 +43,10 @@ Reference:
   doi = 	"10.18653/v1/W16-3210",
   url = 	"http://www.aclweb.org/anthology/W16-3210"
 }
-'''
+```
 French data, Ambiguous COCO evaluation data, and Test 2017 data:
 
-'''
+```
 @InProceedings{elliott-EtAl:2017:WMT,
   author    = {Elliott, Desmond  and  Frank, Stella  and  Barrault, Lo\"{i}c  and  Bougares, Fethi  and  Specia, Lucia},
   title     = {Findings of the Second Shared Task on Multimodal Machine Translation and Multilingual Image Description},
@@ -58,9 +58,9 @@ French data, Ambiguous COCO evaluation data, and Test 2017 data:
   pages     = {215--233},
   url       = {http://www.aclweb.org/anthology/W17-4718}
 }
-'''
+```
 Czech data:
-'''
+```
 @inproceedings{barrault2018findings,
   title={Findings of the Third Shared Task on Multimodal Machine Translation},
   author={Barrault, Lo{\"\i}c and Bougares, Fethi and Specia, Lucia and Lala, Chiraag and Elliott, Desmond and Frank, Stella},
@@ -68,23 +68,29 @@ Czech data:
   pages={304--323},
   year={2018}
 }
-'''
+```
 ## MSCOCO
 English data:
-
-
+```
+@article{chen2015microsoft,
+  title={Microsoft coco captions: Data collection and evaluation server},
+  author={Chen, Xinlei and Fang, Hao and Lin, Tsung-Yi and Vedantam, Ramakrishna and Gupta, Saurabh and Doll{\'a}r, Piotr and Zitnick, C Lawrence},
+  journal={arXiv preprint arXiv:1504.00325},
+  year={2015}
+}
+```
 
 Japanese data:
-'''
+```
 @article{yoshikawa2017stair,
   title={Stair captions: Constructing a large-scale japanese image caption dataset},
   author={Yoshikawa, Yuya and Shigeto, Yutaro and Takeuchi, Akikazu},
   journal={arXiv preprint arXiv:1705.00823},
   year={2017}
 }
-'''
+```
 Chinese data:
-'''
+```
 @article{li2019coco,
   title={COCO-CN for Cross-Lingual Image Tagging, Captioning, and Retrieval},
   author={Li, Xirong and Xu, Chaoxi and Wang, Xiaoxu and Lan, Weiyu and Jia, Zhengxiong and Yang, Gang and Xu, Jieping},
@@ -95,7 +101,7 @@ Chinese data:
   year={2019},
   publisher={IEEE}
 }
-'''
+```
 ## Feature Extraction
 
 We use MMF to extract detection features from the image. MMF is a modular framework for vision and language multimodal research. Built on top of PyTorch:
