@@ -20,39 +20,82 @@ This repo provides the code of [M3P](https://arxiv.org/pdf/2006.02635.pdf), a Mu
 Including datasets:
 - [x] Multi30K [28, 29]
 - [x] MSCOCO [16, 30, 31, 34] 
-- [] MILD (*It will be released later.)
+- [ ] MILD (*It will be released later.)
 
+If you use these resources in your research, please consider citing the following papers:
 
-Multi30K extended Flickr30K [32] to German (de), French (fr) and Czech
-(cs). It contains 31,783 images and provides 5 captions per image in English and German and 1 caption per
-image in French and Czech. We use the train, dev, test splits as defined in [32]. MSCOCO contains 123,287
-images and provides 5 captions per image in English, but fewer in Chinese and Japanese. STAIR Captions[33]
-extended MSCOCO with 820K Japanese captions for COCO images. [31] extended MSCOCO with Chinese captions for 20K images.
+## Multi30K
+English and German data:
 
-Head to reference to download the fine-tuning datasets.
 Reference:
-[28] Desmond Elliott, Stella Frank, Khalil Sima’an, and Lucia Specia. Multi30k: Multilingual english-german
-image descriptions. arXiv preprint arXiv:1605.00459, 2016.
+'''
+@InProceedings{W16-3210,
+  author = 	"Elliott, Desmond
+		and Frank, Stella
+		and Sima'an, Khalil
+		and Specia, Lucia",
+  title = 	"Multi30K: Multilingual English-German Image Descriptions",
+  booktitle = 	"Proceedings of the 5th Workshop on Vision and Language",
+  year = 	"2016",
+  publisher = 	"Association for Computational Linguistics",
+  pages = 	"70--74",
+  location = 	"Berlin, Germany",
+  doi = 	"10.18653/v1/W16-3210",
+  url = 	"http://www.aclweb.org/anthology/W16-3210"
+}
+'''
+French data, Ambiguous COCO evaluation data, and Test 2017 data:
 
-[29] Desmond Elliott, Stella Frank, Loïc Barrault, Fethi Bougares, and Lucia Specia. Findings of the second
-shared task on multimodal machine translation and multilingual image description.
+'''
+@InProceedings{elliott-EtAl:2017:WMT,
+  author    = {Elliott, Desmond  and  Frank, Stella  and  Barrault, Lo\"{i}c  and  Bougares, Fethi  and  Specia, Lucia},
+  title     = {Findings of the Second Shared Task on Multimodal Machine Translation and Multilingual Image Description},
+  booktitle = {Proceedings of the Second Conference on Machine Translation, Volume 2: Shared Task Papers},
+  month     = {September},
+  year      = {2017},
+  address   = {Copenhagen, Denmark},
+  publisher = {Association for Computational Linguistics},
+  pages     = {215--233},
+  url       = {http://www.aclweb.org/anthology/W17-4718}
+}
+'''
+Czech data:
+'''
+@inproceedings{barrault2018findings,
+  title={Findings of the Third Shared Task on Multimodal Machine Translation},
+  author={Barrault, Lo{\"\i}c and Bougares, Fethi and Specia, Lucia and Lala, Chiraag and Elliott, Desmond and Frank, Stella},
+  booktitle={Proceedings of the Third Conference on Machine Translation: Shared Task Papers},
+  pages={304--323},
+  year={2018}
+}
+'''
+## MSCOCO
+English data:
 
-[30] Takashi Miyazaki and Nobuyuki Shimizu. Cross-lingual image caption generation. In ACL, 2016.
-
-[31] Xirong Li, Chaoxi Xu, Xiaoxu Wang, Weiyu Lan, Zhengxiong Jia, Gang Yang, and Jieping Xu. Coco-cn
-for cross-lingual image tagging, captioning and retrieval. In IEEE Transactions on Multimedia, 2019.
-
-[32] Peter Young, Alice Lai, Micah Hodosh, and Julia Hockenmaier. From image descriptions to visual
-denotations: New similarity metrics for semantic inference over event descriptions. Transactions of the
-Association for Computational Linguistics, 2:67–78, 2014.
-
-[33] Yuya Yoshikawa, Yutaro Shigeto, and Akikazu Takeuchi. Stair captions: Constructing a large-scale
-japanese image caption dataset. arXiv preprint arXiv:1705.00823, 2017.
-
-[34] Andrej Karpathy and Li Fei-Fei. Deep visual-semantic alignments for generating image descriptions. In
-Proceedings of the IEEE conference on computer vision and pattern recognition, pages 3128–3137, 2015.
 
 
+Japanese data:
+'''
+@article{yoshikawa2017stair,
+  title={Stair captions: Constructing a large-scale japanese image caption dataset},
+  author={Yoshikawa, Yuya and Shigeto, Yutaro and Takeuchi, Akikazu},
+  journal={arXiv preprint arXiv:1705.00823},
+  year={2017}
+}
+'''
+Chinese data:
+'''
+@article{li2019coco,
+  title={COCO-CN for Cross-Lingual Image Tagging, Captioning, and Retrieval},
+  author={Li, Xirong and Xu, Chaoxi and Wang, Xiaoxu and Lan, Weiyu and Jia, Zhengxiong and Yang, Gang and Xu, Jieping},
+  journal={IEEE Transactions on Multimedia},
+  volume={21},
+  number={9},
+  pages={2347--2360},
+  year={2019},
+  publisher={IEEE}
+}
+'''
 ## Feature Extraction
 
 We use MMF to extract detection features from the image. MMF is a modular framework for vision and language multimodal research. Built on top of PyTorch:
