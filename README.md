@@ -105,7 +105,7 @@ Chinese data:
 ## Feature Extraction
 
 We use MMF to extract detection features from the image. MMF is a modular framework for vision and language multimodal research. Built on top of PyTorch:
-[Feature Extraction](https://github.com/facebookresearch/mmf/tree/6d89e1dede448682d549fb81d073536a31f88548) and [Feature Extraction script](mmf/extract_features_vmb.py at 6d89e1dede448682d549fb81d073536a31f88548 · facebookresearch/mmf · GitHub)
+[Feature Extraction](https://github.com/facebookresearch/mmf/tree/6d89e1dede448682d549fb81d073536a31f88548) and [Feature Extraction script](https://github.com/facebookresearch/mmf/blob/6d89e1dede448682d549fb81d073536a31f88548/tools/scripts/features/extract_features_vmb.py)
 
 *Note: ['bbox', 'captions', 'objects', 'features', 'image_id', 'num_boxes', 'wh'] This feature list is taken as the attributes of h5 file, which is extracted by the above script. The image_id equal to image_file in our project.
 
