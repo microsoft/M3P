@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation. All rights reserved.
-# Licensed under the MIT License.
-#
 #!/usr/bin/env perl
 #
 # This file is part of moses.  Its use is licensed under the GNU Lesser General

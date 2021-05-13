@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation. All rights reserved.
-# Licensed under the MIT License.
-#
 # Copyright (c) 2019-present, Facebook, Inc.
 # All rights reserved.
 #
@@ -107,6 +104,23 @@ def build_model(params):
                 if k not in reloaded:
                     reloaded[k] = model.state_dict()[k]
 
+            if params.multi_reload_model != '':
+                params.multi_reload_model = [s for s in params.multi_reload_model.split(',') if len(s) > 0]
+                reloaded_v2 = torch.load(params.multi_reload_model[0], map_location=lambda storage, loc: storage.cuda(params.local_rank))[
+                    'model']
+                if all([k.startswith('module.') for k in reloaded_v2.keys()]):
+                    reloaded_v2 = {k[len('module.'):]: v for k, v in reloaded_v2.items()}
+
+                for ens_model in params.multi_reload_model[1:]:
+                    reloaded_tmp = torch.load(ens_model, map_location=lambda storage, loc: storage.cuda(params.local_rank))['model']
+                    if all([k.startswith('module.') for k in reloaded_tmp.keys()]):
+                        reloaded_tmp = {k[len('module.'):]: v for k, v in reloaded_tmp.items()}
+                    for k in reloaded_v2.keys():
+                        reloaded_v2[k] += reloaded_tmp[k]
+                for k in reloaded_v2.keys():
+                    reloaded_v2[k] /= len(params.multi_reload_model)
+                for k in reloaded.keys():
+                    reloaded[k] = reloaded[k]*0.6+reloaded_v2[k]*0.4
             model.load_state_dict(reloaded)
 
         logger.debug("Model: {}".format(model))

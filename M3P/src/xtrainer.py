@@ -28,7 +28,7 @@ from .utils import parse_lambda_config, update_lambdas
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
-from .trainer_collate import retrieval_collate,caption_collate,retrieval_pretrain_collate,mt_caption_collate
+
 logger = getLogger()
 
 
@@ -111,6 +111,8 @@ class Trainer(object):
             [('MA-%s' % lang, []) for lang in params.mass_steps] +
             [('BT-%s-%s-%s' % (l1, l2, l3), []) for l1, l2, l3 in params.bt_steps] +
             [('IC-%s-%s' % (l1, l2), []) for l1, l2 in params.cross_modal_steps] +
+            [('FRLB-IC-%s-%s' % (l1, l2), []) for l1, l2 in params.cross_modal_steps] +
+            [('SLIDE-%s' % (l2), []) for l1, l2 in params.cross_rel_steps] +
             [('IMLM-%s' % l1, []) for l1, l2 in params.cross_mass_steps] +
             [('IDA_FULL-%s' % l1, []) for l1, l2 in params.cross_ae_steps] +
             [('IDA-%s' % l1, []) for l1, l2 in params.cross_ae_steps] +
@@ -120,7 +122,9 @@ class Trainer(object):
             [('MRM-%s' % l, []) for l, l2 in params.cross_mrm_steps] +
             [('MRFR-%s' % l, []) for l, l2 in params.cross_mrfr_steps] +
             [('t2i-%s' % l, []) for l, l2 in params.cross_rel_steps] +
-            [('i2t-%s' % l, []) for l, l2 in params.cross_rel_steps]
+            [('i2t-%s' % l, []) for l, l2 in params.cross_rel_steps]+
+            [('FRLB-t2i-%s' % l, []) for l, l2 in params.cross_rel_steps] +
+            [('FRLB-i2t-%s' % l, []) for l, l2 in params.cross_rel_steps]
         )
 
         self.last_time = time.time()
@@ -687,6 +691,46 @@ class Trainer(object):
         assert x.size(1) % 8 == 0
         return x, lengths, positions, langs, idx
 
+    def clm_step(self, lang1, lang2, lambda_coeff):
+        """
+        Next word prediction step (causal prediction).
+        CLM objective.
+        """
+        assert lambda_coeff >= 0
+        if lambda_coeff == 0:
+            return
+        params = self.params
+        name = 'model' if params.encoder_only else 'decoder'
+        model = getattr(self, name)
+        model.train()
+
+        # generate batch / select words to predict
+        x, lengths, positions, langs, _ = self.generate_batch(lang1, lang2, 'causal')
+        x, lengths, positions, langs, _ = self.round_batch(x, lengths, positions, langs)
+        alen = torch.arange(lengths.max(), dtype=torch.long, device=lengths.device)
+        pred_mask = alen[:, None] < lengths[None] - 1
+        if params.context_size > 0:  # do not predict without context
+            pred_mask[:params.context_size] = 0
+        y = x[1:].masked_select(pred_mask[:-1])
+        assert pred_mask.sum().item() == y.size(0)
+
+        # cuda
+        x, lengths, langs, pred_mask, y = to_cuda(x, lengths, langs, pred_mask, y)
+
+        # forward / loss
+        tensor = model('fwd', x=x, lengths=lengths, langs=langs, causal=True)
+        _, loss = model('predict', tensor=tensor, pred_mask=pred_mask, y=y, get_scores=False)
+        self.stats[('CLM-%s' % lang1) if lang2 is None else ('CLM-%s-%s' % (lang1, lang2))].append(loss.item())
+        loss = lambda_coeff * loss
+
+        # optimize
+        self.optimize(loss)
+
+        # number of processed sentences / words
+        self.n_sentences += params.batch_size
+        self.stats['processed_s'] += lengths.size(0)
+        self.stats['processed_w'] += pred_mask.sum().item()
+
     def mlm_step(self, lang1, lang2, lambda_coeff):
         """
         Masked word prediction step.
@@ -724,6 +768,361 @@ class Trainer(object):
         self.n_sentences += params.batch_size
         self.stats['processed_s'] += lengths.size(0)
         self.stats['processed_w'] += pred_mask.sum().item()
+
+    def pc_step(self, lang1, lang2, lambda_coeff):
+        """
+        Parallel classification step. Predict if pairs of sentences are mutual translations of each other.
+        """
+        assert lambda_coeff >= 0
+        if lambda_coeff == 0:
+            return
+        params = self.params
+        name = 'model' if params.encoder_only else 'encoder'
+        model = getattr(self, name)
+        model.train()
+
+        lang1_id = params.lang2id[lang1]
+        lang2_id = params.lang2id[lang2]
+
+        # sample parallel sentences
+        (x1, len1), (x2, len2) = self.get_batch('align', lang1, lang2)
+        bs = len1.size(0)
+        if bs == 1:  # can happen (although very rarely), which makes the negative loss fail
+            self.n_sentences += params.batch_size
+            return
+
+        # associate lang1 sentences with their translations, and random lang2 sentences
+        y = torch.LongTensor(bs).random_(2)
+        idx_pos = torch.arange(bs)
+        idx_neg = ((idx_pos + torch.LongTensor(bs).random_(1, bs)) % bs)
+        idx = (y == 1).long() * idx_pos + (y == 0).long() * idx_neg
+        x2, len2 = x2[:, idx], len2[idx]
+
+        # generate batch / cuda
+        x, lengths, positions, langs = concat_batches(x1, len1, lang1_id, x2, len2, lang2_id, params.pad_index,
+                                                      params.eos_index, reset_positions=False)
+        x, lengths, positions, langs, new_idx = self.round_batch(x, lengths, positions, langs)
+        if new_idx is not None:
+            y = y[new_idx]
+        x, lengths, positions, langs = to_cuda(x, lengths, positions, langs)
+
+        # get sentence embeddings
+        h = model('fwd', x=x, lengths=lengths, positions=positions, langs=langs, causal=False)[0]
+
+        # parallel classification loss
+        CLF_ID1, CLF_ID2 = 8, 9  # very hacky, use embeddings to make weights for the classifier
+        emb = (model.module if params.multi_gpu else model).embeddings.weight
+        pred = F.linear(h, emb[CLF_ID1].unsqueeze(0), emb[CLF_ID2, 0])
+        loss = F.binary_cross_entropy_with_logits(pred.view(-1), y.to(pred.device).type_as(pred))
+        self.stats['PC-%s-%s' % (lang1, lang2)].append(loss.item())
+        loss = lambda_coeff * loss
+
+        # optimize
+        self.optimize(loss)
+
+        # number of processed sentences / words
+        self.n_sentences += params.batch_size
+        self.stats['processed_s'] += bs
+        self.stats['processed_w'] += lengths.sum().item()
+
+
+def batch_sentences(sentences, lg_ids=None):
+    """
+    Take as input a list of n sentences (torch.LongTensor vectors) and return
+    a tensor of size (slen, n) where slen is the length of the longest
+    sentence, and a vector lengths containing the length of each sentence.
+    """
+    # sentences = sorted(sentences, key=lambda x: len(x), reverse=True)
+    lengths = torch.LongTensor([len(s) + 2 for s in sentences])
+    sent = torch.LongTensor(lengths.max().item(), lengths.size(0)).fill_(1)
+    if lg_ids is not None:
+        lgs = torch.LongTensor(lengths.max().item(), lengths.size(0)).fill_(4)
+    else:
+        lgs = None
+    sent[0] = 0
+    for i, s in enumerate(sentences):
+        if lengths[i] > 2:  # if sentence not empty
+            sent[1:lengths[i] - 1, i].copy_(torch.from_numpy(s.astype(np.int64)))
+        sent[lengths[i] - 1, i] = 2
+        if lg_ids is not None:
+            lgs[:, i] = lg_ids[i]
+
+    if lgs is None:
+        return sent, lengths
+    return sent, lengths, lgs
+
+
+def batch_sentences_v2(sentences, lm_labels=None):
+    """
+    Take as input a list of n sentences (torch.LongTensor vectors) and return
+    a tensor of size (slen, n) where slen is the length of the longest
+    sentence, and a vector lengths containing the length of each sentence.
+    """
+    # sentences = sorted(sentences, key=lambda x: len(x), reverse=True)
+    lengths = torch.LongTensor([len(s) + 2 for s in sentences])
+    sent = torch.LongTensor(lengths.max().item(), lengths.size(0)).fill_(1)
+    if lm_labels is not None:
+        _labels = torch.LongTensor(lengths.max().item(), lengths.size(0)).fill_(-1)
+
+    sent[0] = 0
+    for i, s in enumerate(sentences):
+        if lengths[i] > 2:  # if sentence not empty
+            sent[1:lengths[i] - 1, i].copy_(torch.from_numpy(s.astype(np.int64)))
+            if lm_labels is not None:
+                lm = np.array(lm_labels[i])
+                _labels[1:lengths[i] - 1, i].copy_(torch.from_numpy(lm.astype(np.int64)))
+        sent[lengths[i] - 1, i] = 2
+        if lm_labels is not None:
+            _labels[lengths[i] - 1, i] = -1
+
+    if lm_labels is not None:
+        return sent, lengths, _labels
+    return sent, lengths
+
+
+def retrieval_collate(data):
+    """Creates mini-batch tensors from the list of tuples (src_seq, trg_seq)."""
+    # separate source and target sequences
+    t2i_batch, i2t_batch = list(zip(*data))
+
+    # t2i
+    def generate_inputs(_batch):
+        sent, att_feats, img_masks, box_feats, obj_labels, pos_labels, img_ids, langs = zip(
+            *_batch)
+        # sent = np.array(sent)
+        _sent = []
+        _pos_labels = []
+        _img_ids = []
+        _langs = []
+        for s, p, i, l in zip(sent, pos_labels, img_ids, langs):
+            _sent.extend(s)
+            _pos_labels.extend(p)
+            _img_ids.extend(i)
+            _langs.extend(l)
+        pos_labels = _pos_labels
+        img_ids = _img_ids
+
+        x_img = torch.stack(att_feats, dim=0)
+        img_loc = torch.stack(box_feats, dim=0)
+        x_img_mask = torch.stack(img_masks, dim=0)
+        x_obj_labels = torch.stack(obj_labels, dim=0)
+
+        x_img = x_img.view([-1] + list(tuple(x_img.size()[2:])))
+        img_loc = img_loc.view([-1] + list(tuple(img_loc.size()[2:])))
+        x_img_mask = x_img_mask.view([-1] + list(tuple(x_img_mask.size()[2:])))
+        x_obj_labels = x_obj_labels.view([-1] + list(tuple(x_obj_labels.size()[2:])))
+
+        _inputs = [batch_sentences(_sent, _langs),
+                   [x_img,
+                    x_img_mask,
+                    img_loc,
+                    x_obj_labels,
+                    pos_labels,
+                    img_ids]  # google_replace
+                   ]
+        return _inputs
+
+    _t2i_out = generate_inputs(t2i_batch) if t2i_batch is not None else None
+    _i2t_out = generate_inputs(i2t_batch) if i2t_batch is not None else None
+    all_return_results = [_t2i_out, _i2t_out]
+    return all_return_results
+
+
+def caption_collate(data):
+    """Creates mini-batch tensors from the list of tuples (src_seq, trg_seq)."""
+    # separate source and target sequences
+    sent, att_feats, img_masks, box_feats, img_ids = list(zip(*data))
+
+    # t2i
+    def generate_inputs():
+        # sent = np.array(sent)
+
+        x_img = torch.stack(att_feats, dim=0)
+        img_loc = torch.stack(box_feats, dim=0)
+        x_img_mask = torch.stack(img_masks, dim=0)
+
+        x_img = x_img.view([-1] + list(tuple(x_img.size()[2:])))
+        img_loc = img_loc.view([-1] + list(tuple(img_loc.size()[2:])))
+        x_img_mask = x_img_mask.view([-1] + list(tuple(x_img_mask.size()[2:])))
+
+        _inputs = [batch_sentences(sent),
+                   [x_img,
+                    x_img_mask,
+                    img_loc,
+                    img_ids]  # google_replace
+                   ]
+        return _inputs
+
+    all_return_results = generate_inputs()
+    return all_return_results
+
+
+def retrieval_pretrain_collate(data):
+    """Creates mini-batch tensors from the list of tuples (src_seq, trg_seq)."""
+    # separate source and target sequences
+    t2i_batch, i2t_batch = list(zip(*data))
+
+    # t2i
+    def generate_inputs_t2i(_batch):
+        sent, att_feats, img_masks, box_feats, obj_labels, lm_label, itm_label, img_ids, ori_feats, masked_types = zip(
+            *_batch)
+        # sent = np.array(sent)
+        _sent = []
+        _img_ids = []
+        lm_labels = []
+        for s, i, p in zip(sent, img_ids, lm_label):
+            _sent.extend(s)
+            _img_ids.extend(i)
+            lm_labels.extend(p)
+        img_ids = _img_ids
+        x_img = torch.stack(att_feats, dim=0)
+        img_loc = torch.stack(box_feats, dim=0)
+        x_img_mask = torch.stack(img_masks, dim=0)
+        x_obj_labels = torch.stack(obj_labels, dim=0)
+        x_img_ori = torch.stack(ori_feats, dim=0)
+
+        x_img = x_img.view([-1] + list(tuple(x_img.size()[2:])))
+        x_img_ori = x_img_ori.view([-1] + list(tuple(x_img_ori.size()[2:])))
+        img_loc = img_loc.view([-1] + list(tuple(img_loc.size()[2:])))
+        x_img_mask = x_img_mask.view([-1] + list(tuple(x_img_mask.size()[2:])))
+        x_obj_labels = x_obj_labels.view([-1] + list(tuple(x_obj_labels.size()[2:])))
+
+        _inputs = [batch_sentences_v2(_sent, lm_labels),
+                   [x_img,
+                    x_img_mask,
+                    img_loc,
+                    x_obj_labels,
+                    itm_label,
+                    x_img_ori,
+                    img_ids]  # google_replace
+                   ]
+        return _inputs
+
+    # i2t
+    def generate_inputs_i2t(_batch):
+        sent, att_feats, img_masks, box_feats, obj_labels, lm_label, itm_label, img_ids, ori_feats, masked_types, clcm_sent, clcm_labels = zip(
+            *_batch)
+        # sent = np.array(sent)
+        _sent = []
+        _clcm_sent = []
+        _img_ids = []
+        lm_labels = []
+        for s, ss, i, p in zip(sent, clcm_sent, img_ids, lm_label):
+            _sent.extend(s)
+            _clcm_sent.extend(ss)
+            _img_ids.extend(i)
+            lm_labels.extend(p)
+        img_ids = _img_ids
+        x_img = torch.stack(att_feats, dim=0)
+        img_loc = torch.stack(box_feats, dim=0)
+        x_img_mask = torch.stack(img_masks, dim=0)
+        x_obj_labels = torch.stack(obj_labels, dim=0)
+        x_img_ori = torch.stack(ori_feats, dim=0)
+        x_clcm_labels = torch.stack(clcm_labels, dim=0)
+
+        x_img = x_img.view([-1] + list(tuple(x_img.size()[2:])))
+        x_img_ori = x_img_ori.view([-1] + list(tuple(x_img_ori.size()[2:])))
+        img_loc = img_loc.view([-1] + list(tuple(img_loc.size()[2:])))
+        x_img_mask = x_img_mask.view([-1] + list(tuple(x_img_mask.size()[2:])))
+        x_obj_labels = x_obj_labels.view([-1] + list(tuple(x_obj_labels.size()[2:])))
+
+        _inputs = [batch_sentences_v2(_sent, lm_labels),
+                   batch_sentences_v2(_clcm_sent, None),
+                   [x_clcm_labels,
+                    x_img,
+                    x_img_mask,
+                    img_loc,
+                    x_obj_labels,
+                    itm_label,
+                    x_img_ori,
+                    img_ids]  # google_replace
+                   ]
+        return _inputs
+
+    _t2i_out = generate_inputs_t2i(t2i_batch) if t2i_batch is not None else None
+    _i2t_out = generate_inputs_i2t(i2t_batch) if i2t_batch is not None else None
+    all_return_results = [_t2i_out, _i2t_out]
+    return all_return_results
+
+
+def mt_caption_collate(data):
+    """Creates mini-batch tensors from the list of tuples (src_seq, trg_seq)."""
+    # separate source and target sequences
+    src_sent,tgt_sent, att_feats, img_masks, box_feats, img_ids = list(zip(*data))
+
+    # t2i
+    def generate_inputs():
+        # sent = np.array(sent)
+
+        x_img = torch.stack(att_feats, dim=0)
+        img_loc = torch.stack(box_feats, dim=0)
+        x_img_mask = torch.stack(img_masks, dim=0)
+
+        x_img = x_img.view([-1] + list(tuple(x_img.size()[2:])))
+        img_loc = img_loc.view([-1] + list(tuple(img_loc.size()[2:])))
+        x_img_mask = x_img_mask.view([-1] + list(tuple(x_img_mask.size()[2:])))
+
+        _inputs = [batch_sentences(src_sent),
+                   batch_sentences(tgt_sent),
+                   [x_img,
+                    x_img_mask,
+                    img_loc,
+                    img_ids]  # google_replace
+                   ]
+        return _inputs
+
+    all_return_results = generate_inputs()
+    return all_return_results
+
+
+def ntg_collate(data):
+    """Creates mini-batch tensors from the list of tuples (src_seq, trg_seq)."""
+    # separate source and target sequences
+    src_sent,tgt_sent = list(zip(*data))
+
+    # t2i
+    _inputs = [batch_sentences(src_sent),
+               batch_sentences(tgt_sent),
+               ]
+    return _inputs
+
+def slide_collate(data):
+    """Creates mini-batch tensors from the list of tuples (src_seq, trg_seq)."""
+    # separate source and target sequences
+    sent, att_feats, img_masks, box_feats, img_ids,cur_label = list(zip(*data))
+
+    # t2i
+    def generate_inputs():
+        # sent = np.array(sent)
+
+        _sent = []
+        _img_ids = []
+        _labels = []
+        for s, i, p in zip(sent, img_ids, cur_label):
+            _sent.extend(s)
+            _img_ids.extend(i)
+            _labels.extend(p)
+
+
+        x_img = torch.stack(att_feats, dim=0)
+        img_loc = torch.stack(box_feats, dim=0)
+        x_img_mask = torch.stack(img_masks, dim=0)
+
+        x_img = x_img.view([-1] + list(tuple(x_img.size()[2:])))
+        img_loc = img_loc.view([-1] + list(tuple(img_loc.size()[2:])))
+        x_img_mask = x_img_mask.view([-1] + list(tuple(x_img_mask.size()[2:])))
+
+        _inputs = [batch_sentences(_sent),
+                   [x_img,
+                    x_img_mask,
+                    img_loc,
+                    _img_ids],
+                    _labels
+                   ]
+        return _inputs
+
+    all_return_results = generate_inputs()
+    return all_return_results
 
 
 class XTrainer(Trainer):
@@ -774,7 +1173,11 @@ class XTrainer(Trainer):
                 data_loader = DataLoader(dataset, batch_size=self.params.batch_size, sampler=sampler,
                                          collate_fn=retrieval_pretrain_collate, num_workers=self.params.num_workers)
             else:
-                data_loader = DataLoader(dataset, batch_size=self.params.batch_size, sampler=sampler,
+                if self.params.is_slide:
+                    data_loader = DataLoader(dataset, batch_size=self.params.batch_size, sampler=sampler,
+                                             collate_fn=slide_collate, num_workers=self.params.num_workers)
+                else:
+                    data_loader = DataLoader(dataset, batch_size=self.params.batch_size, sampler=sampler,
                                          collate_fn=retrieval_collate, num_workers=self.params.num_workers)
 
         logger.info("iterator (%s) done" % ','.join([str(x) for x in [iter_name, lang1, lang2] if x is not None]))
@@ -912,6 +1315,131 @@ class XTrainer(Trainer):
         y = y.masked_select(pred_mask)
         return x1, l1, x2, l2, y, pred_mask, pos
 
+    def bart_token_mask_sent(self, x, l, min_len=100000):
+        """ Restricted mask sents
+            if min_len is equal to 1, it can be viewed as
+            discrete mask;
+            if min_len -> inf, it can be viewed as
+            pure sentence mask
+            x : [len,batch]
+            l: [batch]
+        """
+        if min_len <= 0:
+            min_len = 1
+        max_len = 0
+        positions, inputs, targets, outputs, = [], [], [], []
+
+        # update to position
+        # position = torch.distributions.poisson.Poisson(rate=3)
+        # m = Poisson(torch.tensor([4]))
+        # m.sample()
+
+        mask_len = np.random.poisson(lam=3) % (round(len(x[:, 0]) * 0.3))
+        if mask_len == 0:
+            mask_len = 1
+        len1 = [l[i] - mask_len + 1 for i in range(l.size(0))]  # masked tokens to [mask]
+        len2 = [l[i] - 1 for i in range(l.size(0))]
+
+        unmasked_tokens = [0 for i in range(l.min().item() - mask_len - 1)]
+
+        # replace with position distribution for length
+
+        segs = self.get_segments(mask_len, min_len)
+
+        for i in range(l.size(0)):
+            words = np.array(x[:l[i], i].tolist())  # [LEN(i)]
+            shuf_segs = self.shuffle_segments(segs, unmasked_tokens)
+            pos_i = self.unfold_segments(shuf_segs)
+            # output_i = words[pos_i].copy()  #[1,2,5,6]
+            # target_i = words[pos_i - 1].copy()
+            input_i = np.concatenate([words[:pos_i[0]], words[pos_i[-1]:]])
+            target_i = words[:-1].copy()
+            output_i = words[1:].copy()
+
+            # words[pos_i] = self.mask_word(words[pos_i]) #decide whether mask these spans
+            input_i[pos_i[0]] = self.params.mask_index
+
+            inputs.append(input_i)
+            targets.append(target_i)
+            outputs.append(output_i)
+            positions.append(np.arange(len(target_i)))
+
+        x1 = torch.LongTensor(max(len1), l.size(0)).fill_(self.params.pad_index)
+        x2 = torch.LongTensor(max(len2), l.size(0)).fill_(self.params.pad_index)
+        y = torch.LongTensor(max(len2), l.size(0)).fill_(self.params.pad_index)
+        pos = torch.LongTensor(max(len2), l.size(0)).fill_(self.params.pad_index)
+        l1 = torch.LongTensor(len1)
+        l2 = torch.LongTensor(len2)
+        for i in range(l.size(0)):
+            x1[:l1[i], i].copy_(torch.LongTensor(inputs[i]))
+            x2[:l2[i], i].copy_(torch.LongTensor(targets[i]))
+            y[:l2[i], i].copy_(torch.LongTensor(outputs[i]))
+            pos[:l2[i], i].copy_(torch.LongTensor(positions[i]))
+
+        pred_mask = y != self.params.pad_index
+        y = y.masked_select(pred_mask)
+        return x1, l1, x2, l2, y, pred_mask, pos
+
+    def mt_step(self, lang1, lang2, lambda_coeff):
+        """
+        Machine translation step.
+        Can also be used for denoising auto-encoding.
+        """
+        assert lambda_coeff >= 0
+        if lambda_coeff == 0:
+            return
+        params = self.params
+
+        name = 'model' if params.encoder_only else 'encoder'
+        model = getattr(self, name)
+        model.train()
+
+        lang1_id = params.lang2id[lang1]
+        lang2_id = params.lang2id[lang2]
+
+        # generate batch
+        if lang1 == lang2:
+            (x1, len1) = self.get_batch('ae', lang1)
+            (x2, len2) = (x1, len1)
+            (x1, len1) = self.add_noise(x1, len1)
+        else:
+            (x1, len1), (x2, len2) = self.get_batch('mt', lang1, lang2)
+        langs1 = x1.clone().fill_(lang1_id)
+        langs2 = x2.clone().fill_(lang2_id)
+
+        # target words to predict
+        alen = torch.arange(len2.max(), dtype=torch.long, device=len2.device)
+        pred_mask = alen[:, None] < len2[None] - 1  # do not predict anything given the last target word
+        y = x2[1:].masked_select(pred_mask[:-1])  # decide whether or not  predict
+        assert len(y) == (len2 - 1).sum().item()
+
+        # key point generate label
+
+        # cuda
+        x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
+
+        # encode source sentence
+        enc1 = model('crossfwd', stream_='text', x=x1, lengths=len1, langs=langs1, causal=False)
+        enc1 = enc1.transpose(0, 1)
+
+        # decode target sentence
+        dec2 = model('crossfwd', stream_='text', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1,
+                     src_len=len1)
+
+        # loss
+        # the last word not apply prediction logic
+        _, loss = model('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False)
+        self.stats[('AE-%s' % lang1) if lang1 == lang2 else ('MT-%s-%s' % (lang1, lang2))].append(loss.item())
+        loss = lambda_coeff * loss
+
+        # optimize
+        self.optimize(loss)
+
+        # number of processed sentences / words
+        self.n_sentences += params.batch_size
+        self.stats['processed_s'] += len2.size(0)
+        self.stats['processed_w'] += (len2 - 1).sum().item()
+
     def ic_step(self, dataset='coco', input_stream='img', lambda_coeff=1):
         """
         Cross-modal Caption generation step
@@ -963,8 +1491,9 @@ class XTrainer(Trainer):
         x1, len1, img_loc, x2, len2, y, x1_mask,langs,langs_img = to_cuda(x1, len1, img_loc, x2, len2, y, x1_mask,langs,langs_img)
 
         # encode source sentence
-        enc1 = model('crossfwd', stream_='img', x=x1, lengths=len1, langs=langs_img, causal=False,
-                     image_loc=img_loc)
+        enc1 = model('crossfwd', stream_='img', x=x1, lengths=len1, langs=langs_img, causal=False, cross_modal=True,
+                     image_loc=img_loc, refine_image=params.refine_image, refine_encoder=params.refine_encoder,
+                     image_dist=None)
         enc1 = enc1.transpose(0, 1)
 
         # decode target sentence
@@ -1030,11 +1559,12 @@ class XTrainer(Trainer):
         x1, len1, img_loc, x2, len2, y, x1_mask,langs,lang_src,x_src,len_src = to_cuda(x1, len1, img_loc, x2, len2, y, x1_mask,langs,lang_src,x_src,len_src)
 
         if params.mt_only_text:
-            encoder_outputs = model('crossfwd', stream_='text', x=x_src, lengths=len_src, langs=lang_src, causal=False)
+            encoder_outputs = model('crossfwd', stream_='text', x=x_src, lengths=len_src, langs=lang_src, causal=False,refine_image=params.refine_image)
             len_all = len_src
         else:
             encoder_outputs = model('jointfwd', x=x_src, lengths=len_src, x_img=x1, lengths_img=len1, causal=False,
-                                    langs=None,image_loc=img_loc)
+                                    langs=None,
+                                    image_loc=img_loc, refine_image=params.refine_image)
             len_all = len_src + len1
 
         # encode source sentence
@@ -1061,6 +1591,110 @@ class XTrainer(Trainer):
         self.n_sentences += params.batch_size
         self.stats['processed_s'] += len2.size(0)
         self.stats['processed_w'] += (len2 - 1).sum().item()
+
+    def bart_mlm_step(self, lang1, lang2, lambda_coeff):
+        """
+        Masked word prediction step.
+        MLM objective is lang2 is None, TLM objective otherwise.
+        """
+        assert lambda_coeff >= 0
+        if lambda_coeff == 0:
+            return
+        params = self.params
+        name = 'model' if params.encoder_only else 'encoder'
+        model = getattr(self, name)
+        model.train()
+
+        lang1_id = params.lang2id[lang1]
+        lang2_id = params.lang2id[lang1]
+
+        # generate batch / select words to predict
+        x, lengths, positions, langs, _ = self.generate_batch(lang1, lang2, 'pred')
+        x, lengths, positions, langs, _ = self.round_batch(x, lengths, positions, langs)
+
+        (x1, len1, x2, len2, y, pred_mask, positions) = self.bart_token_mask_sent(x, lengths)
+
+        if params.use_noise:
+            x1,len1 = self.add_noise(x1,len1)
+        langs1 = x1.clone().fill_(lang1_id)
+        langs2 = x2.clone().fill_(lang2_id)
+
+        # cuda
+        x1,x2,len1,len2, y, pred_mask, positions,langs1,langs2 = to_cuda(x1,x2,len1,len2, y, pred_mask, positions,langs1,langs2)
+
+        enc1 = model('crossfwd', stream_='text', x=x1, lengths=len1, langs=langs1, causal=False)
+        enc1 = enc1.transpose(0, 1)
+
+        # enc_mask = x1.ne(params.mask_index)
+        # enc_mask = enc_mask.transpose(0, 1)
+
+        dec2 = model('crossfwd', stream_='text',
+                     x=x2, lengths=len2, langs=langs2, causal=True,
+                     src_enc=enc1, src_len=len1)
+
+        _, loss = model('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False)
+
+        self.stats[('M-BART-%s' % lang1) if lang2 is None else ('MLM-%s-%s' % (lang1, lang2))].append(loss.item())
+        loss = lambda_coeff * loss
+
+        # optimize
+        self.optimize(loss)
+
+        # number of processed sentences / words
+        self.n_sentences += params.batch_size
+        self.stats['processed_s'] += lengths.size(0)
+        self.stats['processed_w'] += pred_mask.sum().item()
+
+    def bart_mass_step(self, lang1, lang2, lambda_coeff):
+        """
+        Masked word prediction step.
+        MLM objective is lang2 is None, TLM objective otherwise.
+        """
+        assert lambda_coeff >= 0
+        if lambda_coeff == 0:
+            return
+        params = self.params
+        name = 'model' if params.encoder_only else 'encoder'
+        model = getattr(self, name)
+        model.train()
+
+        lang1_id = params.lang2id[lang1]
+        lang2_id = params.lang2id[lang1]
+
+        # generate batch / select words to predict
+        x, lengths, positions, langs, _ = self.generate_batch(lang1, lang2, 'pred')
+        x, lengths, positions, langs, _ = self.round_batch(x, lengths, positions, langs)
+
+        (x1, len1, x2, len2, y, pred_mask, positions) = self.restricted_mask_sent(x, lengths)
+
+        langs1 = x1.clone().fill_(lang1_id)
+        langs2 = x2.clone().fill_(lang2_id)
+
+        # cuda
+        x1,x2,len1,len2, y, pred_mask, positions,langs1,langs2 = to_cuda(x1,x2,len1,len2, y, pred_mask, positions,langs1,langs2)
+
+        enc1 = model('crossfwd', stream_='text', x=x1, lengths=len1, langs=langs1, causal=False)
+        enc1 = enc1.transpose(0, 1)
+
+        enc_mask = x1.ne(params.mask_index)
+        enc_mask = enc_mask.transpose(0, 1)
+
+        dec2 = model('crossfwd', stream_='text',
+                     x=x2, lengths=len2, langs=langs2, causal=True,
+                     src_enc=enc1, src_len=len1, positions=positions, enc_mask=enc_mask.bool().cuda())
+
+        _, loss = model('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False)
+
+        self.stats[('M-MASS-%s' % lang1) if lang2 is None else ('M-MASS-%s-%s' % (lang1, lang2))].append(loss.item())
+        loss = lambda_coeff * loss
+
+        # optimize
+        self.optimize(loss)
+
+        # number of processed sentences / words
+        self.n_sentences += params.batch_size
+        self.stats['processed_s'] += lengths.size(0)
+        self.stats['processed_w'] += pred_mask.sum().item()
 
     def _mask_object(self, object_features,mask_len=50):
         # we need to mask it when training
@@ -1097,12 +1731,159 @@ class XTrainer(Trainer):
         att_feat = F.normalize(masked_object_features, dim=-1)
         return att_feat.numpy()
 
+    def bart_img_noise(self,object_features,loc_features,img_mask):
+        object_features_numpy = object_features.numpy()
+        masked_object_features = []
+        mask_len = np.random.poisson(lam=3) % (round(len(object_features[0]) * 0.5)) + 1
+        for i in range(len(object_features_numpy)):
+            masked_object_features.append(self._mask_object(object_features_numpy[i],mask_len))
+        att_feat = torch.FloatTensor(masked_object_features)
+        len_img = att_feat.shape[1]
+        loc_features = loc_features[:,:len_img]
+        img_mask = img_mask[:,:len_img]
+        return att_feat,loc_features,img_mask
+
+    def bart_img_step(self, dataset='coco', input_stream='img', token_mask=False, lambda_coeff=1):
+        # align image and text, based on image objects and caption fragment
+
+        assert lambda_coeff >= 0
+        if lambda_coeff == 0:
+            return
+        params = self.params
+        name = 'model' if params.encoder_only else 'encoder'
+        model = getattr(self, name)
+        model.train()
+
+        (x2, len2), (x_img, x_img_mask, img_loc, img_id) = self.get_batch('ida', dataset, input_stream)
+        x_img,img_loc,x_img_mask = self.bart_img_noise(x_img,img_loc,x_img_mask)
+
+        if len(params.ft_lgs) > 0:
+            lang1_id = params.lang2id[params.ft_lgs[0]]
+            langs = x2.clone().fill_(lang1_id)
+        else:
+            lang1_id = params.lang2id['en']
+            langs = x2.clone().fill_(lang1_id)
+
+        img_len = x_img_mask.sum(dim=1)
+        x_img = x_img.transpose(0, 1)
+        img_loc = img_loc.transpose(0, 1)
+
+        if len(params.ft_lgs) > 0:
+            lang1_id = params.lang2id[params.ft_lgs[0]]
+            langs_img = x_img_mask.transpose(0,1).clone().fill_(lang1_id)
+        else:
+            lang1_id = params.lang2id['en']
+            langs_img = x_img_mask.transpose(0,1).clone().fill_(lang1_id)
+
+        # target words to predict
+        alen = torch.arange(len2.max(), dtype=torch.long, device=len2.device)
+        pred_mask = alen[:, None] < len2[None] - 1  # do not predict anything given the last target word
+        y = x2[1:].masked_select(pred_mask[:-1])  # decide whether or not  predict
+        assert len(y) == (len2 - 1).sum().item()
+
+        # cuda
+        x1, len1, img_loc, x2, len2, y, pred_mask,langs,langs_img = to_cuda(x_img, img_len, img_loc, x2, len2, y, pred_mask,langs,langs_img)
+
+        # encode source sentence
+        enc1 = model('crossfwd', stream_='img', x=x1, lengths=len1, langs=langs_img, causal=False,
+                     image_loc=img_loc, refine_image=params.refine_image,
+                     image_dist=None)
+        enc1 = enc1.transpose(0, 1)
+
+        # decode target sentence
+        dec2 = model('crossfwd', stream_='text', x=x2, lengths=len2, langs=langs, causal=True, src_enc=enc1,
+                     src_len=len1)
+
+        _, loss = model('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False)
+
+        self.stats[('IDA-%s' % dataset)].append(loss.item())
+
+        loss = lambda_coeff * loss
+
+        self.optimize(loss)
+
+        # number of processed sentences / words
+        self.n_sentences += params.batch_size
+        self.stats['processed_s'] += len2.size(0)
+        self.stats['processed_w'] += (len2 - 1).sum().item()
+
+    def tifg_step(self, dataset='coco', input_stream='img', lambda_coeff=1):
+        """
+        Parallel classification step. Predict if pairs of sentences are mutual translations of each other.
+        """
+        assert lambda_coeff >= 0
+        if lambda_coeff == 0:
+            return
+        params = self.params
+        name = 'model' if params.encoder_only else 'encoder'
+        model = getattr(self, name)
+        model.train()
+
+        (x1, len1), (x_img, x_img_mask, img_loc, img_id) = self.get_batch('tifg', dataset, input_stream)
+
+        img_len = x_img_mask.sum(dim=1)
+        x_img = x_img.transpose(0, 1)
+        img_loc = img_loc.transpose(0, 1)
+
+        x_img = x_img[:36]
+        img_len -= 64
+        img_loc = img_loc[:36]
+
+        x_img, x_img_mask, img_len, img_loc, x1, len1 = to_cuda(x_img, x_img_mask, img_len, img_loc, x1, len1)
+
+        bs = len1.size(0)
+        if bs == 1:  # can happen (although very rarely), which makes the negative loss fail
+            self.n_sentences += params.batch_size
+            return
+
+        img_enc, img_mask = model('ImageEmbed', x=x_img, lengths=img_len, causal=False, image_loc=img_loc,
+                                  refine_image=params.refine_image, image_dist=None)
+
+        enc1 = model('crossfwd', stream_='text', x=x1, lengths=len1, langs=None, causal=False)
+        enc1 = enc1.transpose(0, 1)
+
+        # enc_mask = x1.ne(params.mask_index)
+        # enc_mask = enc_mask.transpose(0, 1)
+
+        dec2 = model('crossfwd', stream_='img',
+                     x=x_img, lengths=img_len, langs=None, causal=True, image_loc=img_loc,
+                     src_enc=enc1, src_len=len1, positions=None, enc_mask=None)
+
+        dec2 = dec2.transpose(0, 1)  # text to image
+
+        loss_G = F.mse_loss(dec2.squeeze(1), img_enc.float())
+
+        self.stats['TIFG-%s' % dataset].append(loss_G.item())
+        loss = lambda_coeff * loss_G
+
+        # optimize
+        self.optimize(loss)
+
+        # number of processed sentences / words
+        self.n_sentences += params.batch_size
+        self.stats['processed_s'] += bs
+        self.stats['processed_w'] += bs * 100
+
     def rel_step(self, dataset='coco', input_stream='img', lambda_1=1, lambda_2=1):
         t2i_batch, i2t_batch = self.get_batch('rel', dataset, input_stream)
         if self.params.t2i_flag:
+            if self.params.is_freelb:
+                self.freelb_t2i_step(t2i_batch, dataset, lambda_1)
+
             self.t2i_step(t2i_batch, dataset, lambda_1)
         if self.params.i2t_flag:
+            if self.params.is_freelb:
+                self.freelb_i2t_step(t2i_batch, dataset, lambda_1)
             self.i2t_step(i2t_batch, dataset, lambda_2)
+
+    def pretrain_rel_step(self, dataset='coco', input_stream='img'):
+        t2i_batch, i2t_batch = self.get_batch('rel', dataset, input_stream)
+        if self.params.t2i_flag:  # pretrain current only english
+            self.pretrain_under_step(t2i_batch, dataset, 't2i', 'en', self.params.lambda_t2i, self.params.lambda_mlm,
+                                     self.params.lambda_mrm, self.params.lambda_mrfr)
+        if self.params.i2t_flag:
+            self.pretrain_under_step(i2t_batch, dataset, 'i2t', 'en', self.params.lambda_i2t, self.params.lambda_mlm,
+                                     self.params.lambda_mrm, self.params.lambda_mrfr)
 
     def t2i_step(self, batches, dataset='coco', lambda_coeff=1):
         assert lambda_coeff >= 0
@@ -1129,11 +1910,13 @@ class XTrainer(Trainer):
 
         encoder_outputs = model('jointfwd', x=x1, lengths=len1, x_img=x_img, lengths_img=img_len, causal=False,
                                 langs=langs,
-                                image_loc=img_loc)
+                                image_loc=img_loc, refine_image=params.refine_image)
 
         encoder_outputs = encoder_outputs.transpose(0, 1)
 
         relation_scores = model('predict', tensor=encoder_outputs, is_relation=True)
+
+        
 
         def one_hot_labels(_labels):
             nb_classes = params.sample_n
@@ -1147,6 +1930,8 @@ class XTrainer(Trainer):
                                   torch.from_numpy(np.array(pos_labels)))
         bce_loss = F.binary_cross_entropy_with_logits(relation_scores.view(-1).cpu(),
                                                       target_labels.view(-1))
+
+        
 
         loss = 0
 
@@ -1178,6 +1963,7 @@ class XTrainer(Trainer):
 
         # generate batch
         (x1, len1, lang_p), (img, img_mask, img_loc, obj_labels, pos_labels, img_ids) = batches
+        #(x1, len1, lang_p), (x2, len2, _), (clcm_labels, img, img_mask, img_loc, obj_labels, pos_labels, img_ids) = batches
 
         # follow uvp
         lang_p = lang_p.transpose(0, 1)
@@ -1188,15 +1974,18 @@ class XTrainer(Trainer):
         x_img = img.transpose(0, 1)
         img_loc = img_loc.transpose(0, 1)
 
+        
         x1, len1, langs, x_img, img_loc, img_len = to_cuda(x1, len1, langs, x_img, img_loc, img_len)
 
         encoder_outputs = model('jointfwd', x=x1, lengths=len1, x_img=x_img, lengths_img=img_len, causal=False,
                                 langs=langs,
-                                image_loc=img_loc)
+                                image_loc=img_loc, refine_image=params.refine_image)
 
         encoder_outputs = encoder_outputs.transpose(0, 1)
 
         relation_scores = model('predict', tensor=encoder_outputs, is_relation=True)
+
+        
 
         def one_hot_labels(_labels):
             nb_classes = params.sample_n
@@ -1216,6 +2005,7 @@ class XTrainer(Trainer):
         _loss = params.multi_cls_loss_weight * ce_loss + params.bin_cls_loss_weight * bce_loss
         loss += _loss
 
+
         self.stats['i2t-%s' % (dataset)].append(loss.item())
         loss = lambda_coeff * loss
         # optimize
@@ -1226,3 +2016,947 @@ class XTrainer(Trainer):
         self.n_sentences += params.batch_size
         self.stats['processed_s'] += bs
         self.stats['processed_w'] += bs * encoder_outputs.size()[1]
+
+    #freeLB t2i and i2t
+    def freelb_t2i_step(self, batches, dataset='coco', lambda_coeff=1):
+        assert lambda_coeff >= 0
+        if lambda_coeff == 0:
+            return
+        params = self.params
+        name = 'model' if params.encoder_only else 'encoder'
+        model = getattr(self, name)
+        model.train()
+
+        (x1, len1, lang_p), (img, img_mask, img_loc, obj_labels, pos_labels, img_ids) = batches
+
+        # follow uvp
+        lang_p = lang_p.transpose(0, 1)
+        lang_img = torch.LongTensor([[params.n_langs] * params.max_region_num] * x1.size()[1])
+        langs = torch.cat([lang_img, lang_p], dim=1)
+        # [img. img_id...sent, sent_id..]
+
+        img_len = img_mask.sum(dim=1)
+        x_img = img.transpose(0, 1)
+        img_loc = img_loc.transpose(0, 1)
+
+        x1, len1, langs, x_img, img_loc, img_len = to_cuda(x1, len1, langs, x_img, img_loc, img_len)
+
+        # free lb
+        embeds_init, delta = self.deal_freelb_delta(model, x1.transpose(0, 1), len1)
+        image_delta = self.deal_image_freelb_delta(x_img)
+
+        # the main loop
+        dp_masks = None
+        adv_steps = 3
+        tr_loss, tb_loss = 0.0, 0.0
+        for astep in range(adv_steps):
+            # (0) forward
+
+            delta.requires_grad_()
+            text_imb = delta + embeds_init
+
+            image_delta.requires_grad_()
+            img_imb = x_img + image_delta
+
+            encoder_outputs = model('jointfwd', x=x1, lengths=len1, x_img=img_imb, lengths_img=img_len, causal=False,
+                                    langs=langs,
+                                    image_loc=img_loc, refine_image=params.refine_image,text_embed=text_imb)
+            encoder_outputs = encoder_outputs.transpose(0, 1)
+
+            relation_scores = model('predict', tensor=encoder_outputs, is_relation=True)
+
+            def one_hot_labels(_labels):
+                nb_classes = params.sample_n
+                targets = _labels.reshape(-1)
+                one_hot_targets = np.eye(nb_classes, dtype='float32')[targets]
+                return torch.from_numpy(one_hot_targets)
+
+            target_labels = one_hot_labels(np.array(pos_labels))
+
+            ce_loss = F.cross_entropy(relation_scores.view(-1, params.sample_n).cpu(),
+                                      torch.from_numpy(np.array(pos_labels)))
+            bce_loss = F.binary_cross_entropy_with_logits(relation_scores.view(-1).cpu(),
+                                                          target_labels.view(-1))
+
+            loss = 0
+
+            _loss = params.multi_cls_loss_weight * ce_loss + params.bin_cls_loss_weight * bce_loss
+            loss += _loss
+
+            # (1) backward
+
+            # if params.n_gpu_per_node > 1:
+            #     loss = loss.mean()  # mean() to average on multi-gpu parallel training
+            # if params.accumulate_gradients > 1:
+            #     loss = loss / params.accumulate_gradients
+
+            loss = loss / (1.0 * adv_steps)
+
+            self.free_optimize(loss)
+
+            tb_loss += loss.item()
+            #
+            # self.free_optimize(loss,adv_steps)
+
+            if astep == adv_steps - 1:
+                # further updates on delta
+                break
+
+            # update delta
+
+            embeds_init, delta = self.update_freelb_delta(model, delta, embeds_init, x1.transpose(0, 1))
+            image_delta = self.update_image_freelb_delta(x_img, image_delta)
+
+        # loss = tr_loss+tb_loss
+
+        self.stats['FRLB-t2i-%s' % (dataset)].append(tb_loss)
+        loss = lambda_coeff * loss
+        # optimize
+        # self.optimize(loss)
+
+        bs = len1.size(0)
+        # number of processed sentences / words
+        self.n_sentences += params.batch_size
+        self.stats['processed_s'] += bs
+        self.stats['processed_w'] += bs * encoder_outputs.size()[1]
+
+    def freelb_i2t_step(self, batches, dataset='coco', lambda_coeff=1):
+        assert lambda_coeff >= 0
+        if lambda_coeff == 0:
+            return
+        params = self.params
+        name = 'model' if params.encoder_only else 'encoder'
+        model = getattr(self, name)
+        model.train()
+
+        # _lang1 = _lang2 = 'en'
+        # lang2_id = params.lang2id[_lang2]
+
+        # generate batch
+        (x1, len1, lang_p), (img, img_mask, img_loc, obj_labels, pos_labels, img_ids) = batches
+
+        # follow uvp
+        lang_p = lang_p.transpose(0, 1)
+        lang_img = torch.LongTensor([[params.n_langs] * params.max_region_num] * x1.size()[1])
+        langs = torch.cat([lang_img, lang_p], dim=1)  # [img. img_id...sent, sent_id..]
+
+        img_len = img_mask.sum(dim=1)
+        x_img = img.transpose(0, 1)
+        img_loc = img_loc.transpose(0, 1)
+
+        x1, len1, langs, x_img, img_loc, img_len = to_cuda(x1, len1, langs, x_img, img_loc, img_len)
+
+        embeds_init, delta = self.deal_freelb_delta(model, x1.transpose(0, 1), len1)
+        image_delta = self.deal_image_freelb_delta(x_img)
+
+        # the main loop
+        dp_masks = None
+        adv_steps = 3
+        tr_loss, tb_loss = 0.0, 0.0
+        for astep in range(adv_steps):
+            # (0) forward
+
+            delta.requires_grad_()
+            text_imb = delta + embeds_init
+
+            image_delta.requires_grad_()
+            img_imb = x_img + image_delta
+
+            encoder_outputs = model('jointfwd', x=x1, lengths=len1, x_img=img_imb, lengths_img=img_len, causal=False,
+                                    langs=langs,
+                                    image_loc=img_loc, refine_image=params.refine_image,text_embed=text_imb)
+            encoder_outputs = encoder_outputs.transpose(0, 1)
+
+            relation_scores = model('predict', tensor=encoder_outputs, is_relation=True)
+
+            def one_hot_labels(_labels):
+                nb_classes = params.sample_n
+                targets = _labels.reshape(-1)
+                one_hot_targets = np.eye(nb_classes, dtype='float32')[targets]
+                return torch.from_numpy(one_hot_targets)
+
+            target_labels = one_hot_labels(np.array(pos_labels))
+
+            ce_loss = F.cross_entropy(relation_scores.view(-1, params.sample_n).cpu(),
+                                      torch.from_numpy(np.array(pos_labels)))
+            bce_loss = F.binary_cross_entropy_with_logits(relation_scores.view(-1).cpu(),
+                                                          target_labels.view(-1))
+
+            loss = 0
+
+            _loss = params.multi_cls_loss_weight * ce_loss + params.bin_cls_loss_weight * bce_loss
+            loss += _loss
+
+            # (1) backward
+
+            # if params.n_gpu_per_node > 1:
+            #     loss = loss.mean()  # mean() to average on multi-gpu parallel training
+            # if params.accumulate_gradients > 1:
+            #     loss = loss / params.accumulate_gradients
+
+            loss = loss / (1.0 * adv_steps)
+
+            self.free_optimize(loss)
+
+            tb_loss += loss.item()
+            #
+            # self.free_optimize(loss,adv_steps)
+
+            if astep == adv_steps - 1:
+                # further updates on delta
+                break
+
+            # update delta
+
+            embeds_init, delta = self.update_freelb_delta(model, delta, embeds_init, x1.transpose(0, 1))
+            image_delta = self.update_image_freelb_delta(x_img, image_delta)
+
+        self.stats['FRLB-i2t-%s' % (dataset)].append(tb_loss)
+        loss = lambda_coeff * loss
+        # optimize
+        # self.optimize(loss)
+
+        bs = len1.size(0)
+        # number of processed sentences / words
+        self.n_sentences += params.batch_size
+        self.stats['processed_s'] += bs
+        self.stats['processed_w'] += bs * encoder_outputs.size()[1]
+
+
+    def get_mask_(self, x, _labels):
+        slen, bs = x.size()[0], x.size()[1]
+        pred_mask = torch.zeros(slen * bs, dtype=torch.uint8)
+        pred_mask = pred_mask.view(slen, bs)
+        pred_mask[_labels != -1] = 1
+        y = _labels[_labels > 0]
+        return y, pred_mask.bool()
+
+    def pretrain_under_step(self, _batch, dataset='coco', task_name='t2i', lang2='en', lambda_coeff_rel=1,
+                            lambda_coeff_mlm=1, lambda_coeff_mrm=1, lambda_coeff_mrfr=1):
+        # assert lambda_coeff >= 0
+        # if lambda_coeff == 0:
+        #     return
+        params = self.params
+        name = 'model' if params.encoder_only else 'encoder'
+        model = getattr(self, name)
+        model.train()
+
+        # clcm will only be activated during i2t
+        if task_name == 't2i':
+            (x1, len1, x1_labels), (img, img_mask, img_loc, obj_labels, pos_labels, ori_att_feats, img_ids) = _batch
+        else:
+            (x1, len1, x1_labels), (x2, len2), (clcm_labels, img, img_mask, img_loc, obj_labels, pos_labels, ori_att_feats, img_ids) = _batch
+
+        # follow uvp
+        langs = torch.LongTensor(
+            [[params.n_langs] * params.max_region_num + [params.lang2id[lang2]] * len1.max().item()] * x1.size()[
+                1]) if params.n_langs > 1 else None
+        # [img. img_id...sent, sent_id..]
+
+        img_len = img_mask.sum(dim=1)
+        x_img = img.transpose(0, 1)
+        img_loc = img_loc.transpose(0, 1)
+
+        y_text, pred_mask_text = self.get_mask_(x1, x1_labels)
+        y_img, pred_mask_img = self.get_mask_(img, obj_labels)
+
+        if task_name == 't2i':
+            x1, len1, langs, x_img, img_loc, img_len, \
+            y_text, pred_mask_text, y_img, pred_mask_img, ori_att_feats = to_cuda(x1, len1, langs, x_img, img_loc, img_len,
+                                                                                  y_text, pred_mask_text, y_img,
+                                                                                  pred_mask_img, ori_att_feats)
+        else:
+            x1, len1, langs, x_img, img_loc, img_len, \
+            y_text, pred_mask_text, y_img, pred_mask_img, ori_att_feats, \
+            clcm_labels, x2, len2 = to_cuda(x1, len1, langs, x_img, img_loc, img_len,
+                                                                                  y_text, pred_mask_text, y_img,
+                                                                                  pred_mask_img, ori_att_feats, 
+                                                                                  clcm_labels, x2, len2)
+
+        if params.is_latent:
+            encoder_outputs,original_text,original_img,text_kld,img_kld = model('jointfwd', x=x1, lengths=len1, x_img=x_img, lengths_img=img_len, causal=False,
+                                    langs=langs,
+                                    image_loc=img_loc, refine_image=params.refine_image,is_latent=True)
+        else:
+            encoder_outputs = model('jointfwd', x=x1, lengths=len1, x_img=x_img, lengths_img=img_len, causal=False,
+                                    langs=langs,
+                                    image_loc=img_loc, refine_image=params.refine_image)
+
+        total_loss = 0
+
+        _text_out = encoder_outputs[x_img.shape[0]:]  # only text part
+        _img_out = encoder_outputs[:x_img.shape[0]]  # only text part
+        _img_out = _img_out.transpose(0, 1)
+
+        if params.is_latent: #reconstruct loss
+            _img_rec = model('transform',tensor=_img_out,stream='img')
+            _text_rec = model('transform',tensor=_text_out,stream='text')
+
+            img_rec_loss= F.mse_loss(_img_rec,original_img)
+            text_rec_loss = F.mse_loss(_text_rec.transpose(0,1),original_text)
+
+            kld_loss = text_kld.mean()+img_kld.mean()
+            rec_loss = img_rec_loss+text_rec_loss
+            total_loss+=params.kld_alpha*kld_loss
+            total_loss+= params.rec_alpha*rec_loss
+
+            self.stats[('KL-%s' % dataset)].append(kld_loss.item())
+            self.stats[('REC-%s' % dataset)].append(rec_loss.item())
+
+        mask_sign_text = pred_mask_text.detach().cpu().numpy()
+        mask_sign_img = pred_mask_img.detach().cpu().numpy()
+
+        # calc mlm loss
+        if len(params.cross_mlm_steps) > 0 and mask_sign_text.sum()>0:
+            try:
+                _, loss = model('predict', tensor=_text_out, pred_mask=pred_mask_text, y=y_text, get_scores=False,
+                                )
+            except:
+                return -1
+
+            self.stats[('CMLM-%s' % dataset)].append(loss.item())
+            total_loss += lambda_coeff_mlm * loss
+
+        # calc mrm loss
+        if len(params.cross_mrm_steps) > 0 and mask_sign_img.sum()>0:
+
+            try:
+                _, loss = model('predict', tensor=_img_out, pred_mask=pred_mask_img, y=obj_labels.cuda().view(-1),
+                                get_scores=False, is_obj=True,)
+            except:
+                return -1
+            self.stats[('MRM-%s' % dataset)].append(loss.item())
+            total_loss += lambda_coeff_mrm * loss
+
+        # calc mrfr
+        if len(params.cross_mrfr_steps) > 0 and mask_sign_img.sum()>0:
+            reg_tensor = model('predict', tensor=_img_out, is_mrfr=True)
+            obj_pred_regs = reg_tensor.reshape(-1, 2048)
+            # get masked object positions, from dim [n, bs, 100] to [n*bs*100]
+            obj_label_ids = obj_labels.reshape(-1)
+            obj_feat_ori = ori_att_feats.reshape(-1, 2048)
+            mask_obj_bool = obj_label_ids != -1
+
+            # get masked positions of predict features and gt features
+            mask_obj_pred_regs = obj_pred_regs[mask_obj_bool, :]
+            mask_obj_feat_ori = obj_feat_ori[mask_obj_bool, :]
+
+            loss = torch.tensor(0.0).cuda()
+
+            # only calculate this loss when mask object exists
+            if mask_obj_feat_ori.size(0) > 0:
+                loss = F.mse_loss(mask_obj_pred_regs, mask_obj_feat_ori)
+
+            self.stats[('MRFR-%s' % dataset)].append(loss.item())
+
+            total_loss += lambda_coeff_mrfr * loss
+
+        encoder_outputs = encoder_outputs.transpose(0, 1)
+
+        # first calc relation loss
+        relation_scores = model('predict', tensor=encoder_outputs, is_relation=True) #not use MSE
+
+        def one_hot_labels(_labels):
+            nb_classes = params.sample_n
+            targets = _labels.reshape(-1)
+            one_hot_targets = np.eye(nb_classes, dtype='float32')[targets]
+            return torch.from_numpy(one_hot_targets)
+
+        target_labels = one_hot_labels(np.array(pos_labels))
+
+        ce_loss = F.cross_entropy(relation_scores.view(-1, params.sample_n).cpu(),
+                                  torch.from_numpy(np.array(pos_labels)))
+        bce_loss = F.binary_cross_entropy_with_logits(relation_scores.view(-1).cpu(),
+                                                      target_labels.view(-1))
+
+        loss = params.multi_cls_loss_weight * ce_loss + params.bin_cls_loss_weight * bce_loss
+
+        self.stats['%s-%s' % (task_name, dataset)].append(loss.item())
+        total_loss += lambda_coeff_rel * loss.cuda()
+
+        # clcm
+
+        if task_name == 'i2t':
+            if len(params.cross_clcm_steps) > 0:
+                encoder_outputs2 = model('jointfwd', x=x2, lengths=len2, x_img=x_img, lengths_img=img_len, causal=False,
+                                        langs=langs,
+                                        image_loc=img_loc, refine_image=params.refine_image)
+    
+                encoder_outputs2 = encoder_outputs2.transpose(0, 1)
+    
+                relation_scores2 = model('predict', tensor=encoder_outputs2, is_clcm=True)
+    
+                #print(relation_scores.shape, clcm_labels.shape)
+    
+                bce_loss2 = F.binary_cross_entropy_with_logits(relation_scores2.view(-1).cpu(),
+                                                          clcm_labels.view(-1).float().cpu())
+                total_loss += bce_loss2.cuda()
+
+                    
+
+
+        self.optimize(total_loss)  # optimize
+
+        self.n_sentences += params.batch_size
+        self.stats['processed_s'] += len1.size(0)
+        self.stats['processed_w'] += len1.sum().item()
+
+    def freelb_pretrain_under_step(self, _batch, dataset='coco', task_name='t2i', lang2='en', lambda_coeff_rel=1,
+                            lambda_coeff_mlm=1, lambda_coeff_mrm=1, lambda_coeff_mrfr=1):
+        # assert lambda_coeff >= 0
+        # if lambda_coeff == 0:
+        #     return
+        params = self.params
+        name = 'model' if params.encoder_only else 'encoder'
+        model = getattr(self, name)
+        model.train()
+
+        # clcm will only be activated during i2t
+        if task_name == 't2i':
+            (x1, len1, x1_labels), (img, img_mask, img_loc, obj_labels, pos_labels, ori_att_feats, img_ids) = _batch
+        else:
+            (x1, len1, x1_labels), (x2, len2), (clcm_labels, img, img_mask, img_loc, obj_labels, pos_labels, ori_att_feats, img_ids) = _batch
+
+        # follow uvp
+        langs = torch.LongTensor(
+            [[params.n_langs] * params.max_region_num + [params.lang2id[lang2]] * len1.max().item()] * x1.size()[
+                1]) if params.n_langs > 1 else None
+        # [img. img_id...sent, sent_id..]
+
+        img_len = img_mask.sum(dim=1)
+        x_img = img.transpose(0, 1)
+        img_loc = img_loc.transpose(0, 1)
+
+        y_text, pred_mask_text = self.get_mask_(x1, x1_labels)
+        y_img, pred_mask_img = self.get_mask_(img, obj_labels)
+
+        if task_name == 't2i':
+            x1, len1, langs, x_img, img_loc, img_len, \
+            y_text, pred_mask_text, y_img, pred_mask_img, ori_att_feats = to_cuda(x1, len1, langs, x_img, img_loc, img_len,
+                                                                                  y_text, pred_mask_text, y_img,
+                                                                                  pred_mask_img, ori_att_feats)
+        else:
+            x1, len1, langs, x_img, img_loc, img_len, \
+            y_text, pred_mask_text, y_img, pred_mask_img, ori_att_feats, \
+            clcm_labels, x2, len2 = to_cuda(x1, len1, langs, x_img, img_loc, img_len,
+                                                                                  y_text, pred_mask_text, y_img,
+                                                                                  pred_mask_img, ori_att_feats, 
+                                                                                  clcm_labels, x2, len2)
+
+        embeds_init1, delta1 = self.deal_freelb_delta(model, x1.transpose(0, 1), len1)
+        if task_name == "i2t":
+            embeds_init2, delta2 = self.deal_freelb_delta(model, x2.transpose(0, 1), len2)
+        image_delta = self.deal_image_freelb_delta(x_img)
+
+        adv_steps = 3
+
+        for astep in range(adv_steps):
+            delta1.requires_grad_()
+            text_imb1 = delta1 + embeds_init1
+            if task_name == "i2t":
+                delta2.requires_grad_()
+                text_imb2 = delta2 + embeds_init2
+
+            image_delta.requires_grad_()
+            img_imb = x_img + image_delta
+
+            encoder_outputs = model('jointfwd', x=x1, lengths=len1, x_img=img_imb, lengths_img=img_len, causal=False,
+                                    langs=langs,
+                                    image_loc=img_loc, refine_image=params.refine_image,text_embed=text_imb1)
+
+            total_loss = 0
+
+            _text_out = encoder_outputs[x_img.shape[0]:]  # only text part
+            _img_out = encoder_outputs[:x_img.shape[0]]  # only text part
+            _img_out = _img_out.transpose(0, 1)
+
+
+            mask_sign_text = pred_mask_text.detach().cpu().numpy()
+            mask_sign_img = pred_mask_img.detach().cpu().numpy()
+
+            # calc mlm loss
+            if len(params.cross_mlm_steps) > 0 and mask_sign_text.sum()>0:
+                try:
+                    _, loss = model('predict', tensor=_text_out, pred_mask=pred_mask_text, y=y_text, get_scores=False,
+                                    )
+                except:
+                    return -1
+
+                if astep == 0:
+                    self.stats[('CMLM-%s' % dataset)].append((loss.item() / (1.0 * adv_steps)))
+                else:
+                    self.stats[('CMLM-%s' % dataset)][-1] += (loss.item() / (1.0 * adv_steps))
+                total_loss += lambda_coeff_mlm * loss
+
+            # calc mrm loss
+            if len(params.cross_mrm_steps) > 0 and mask_sign_img.sum()>0:
+
+                try:
+                    _, loss = model('predict', tensor=_img_out, pred_mask=pred_mask_img, y=obj_labels.cuda().view(-1),
+                                    get_scores=False, is_obj=True,)
+                except:
+                    return -1
+
+                if astep == 0:
+                    self.stats[('MRM-%s' % dataset)].append((loss.item() / (1.0 * adv_steps)))
+                else:
+                    self.stats[('MRM-%s' % dataset)][-1] += (loss.item() / (1.0 * adv_steps))
+                total_loss += lambda_coeff_mrm * loss
+
+            # calc mrfr
+            if len(params.cross_mrfr_steps) > 0 and mask_sign_img.sum()>0:
+                reg_tensor = model('predict', tensor=_img_out, is_mrfr=True)
+                obj_pred_regs = reg_tensor.reshape(-1, 2048)
+                # get masked object positions, from dim [n, bs, 100] to [n*bs*100]
+                obj_label_ids = obj_labels.reshape(-1)
+                obj_feat_ori = ori_att_feats.reshape(-1, 2048)
+                mask_obj_bool = obj_label_ids != -1
+
+                # get masked positions of predict features and gt features
+                mask_obj_pred_regs = obj_pred_regs[mask_obj_bool, :]
+                mask_obj_feat_ori = obj_feat_ori[mask_obj_bool, :]
+
+                loss = torch.tensor(0.0).cuda()
+
+                # only calculate this loss when mask object exists
+                if mask_obj_feat_ori.size(0) > 0:
+                    loss = F.mse_loss(mask_obj_pred_regs, mask_obj_feat_ori)
+
+                if astep == 0:
+                    self.stats[('MRFR-%s' % dataset)].append((loss.item() / (1.0 * adv_steps)))
+                else:
+                    self.stats[('MRFR-%s' % dataset)][-1] += (loss.item() / (1.0 * adv_steps))
+
+                total_loss += lambda_coeff_mrfr * loss
+
+            encoder_outputs = encoder_outputs.transpose(0, 1)
+
+            # first calc relation loss
+            relation_scores = model('predict', tensor=encoder_outputs, is_relation=True) #not use MSE
+
+            def one_hot_labels(_labels):
+                nb_classes = params.sample_n
+                targets = _labels.reshape(-1)
+                one_hot_targets = np.eye(nb_classes, dtype='float32')[targets]
+                return torch.from_numpy(one_hot_targets)
+
+            target_labels = one_hot_labels(np.array(pos_labels))
+
+            ce_loss = F.cross_entropy(relation_scores.view(-1, params.sample_n).cpu(),
+                                      torch.from_numpy(np.array(pos_labels)))
+            bce_loss = F.binary_cross_entropy_with_logits(relation_scores.view(-1).cpu(),
+                                                          target_labels.view(-1))
+
+            loss = params.multi_cls_loss_weight * ce_loss + params.bin_cls_loss_weight * bce_loss
+
+            if astep == 0:
+                self.stats['%s-%s' % (task_name, dataset)].append(loss.item() / (1.0 * adv_steps))
+            else:
+                self.stats['%s-%s' % (task_name, dataset)][-1] += (loss.item() / (1.0 * adv_steps))
+
+            total_loss += lambda_coeff_rel * loss.cuda()
+
+            # clcm
+
+            if task_name == 'i2t':
+                if len(params.cross_clcm_steps) > 0:
+                    encoder_outputs2 = model('jointfwd', x=x2, lengths=len2, x_img=img_imb, lengths_img=img_len, causal=False,
+                                            langs=langs,
+                                            image_loc=img_loc, refine_image=params.refine_image, text_embed=text_imb2)
+
+                    encoder_outputs2 = encoder_outputs2.transpose(0, 1)
+
+                    relation_scores2 = model('predict', tensor=encoder_outputs2, is_clcm=True)
+
+                    #print(relation_scores.shape, clcm_labels.shape)
+
+                    bce_loss2 = F.binary_cross_entropy_with_logits(relation_scores2.view(-1).cpu(),
+                                                              clcm_labels.view(-1).float().cpu())
+                    total_loss += bce_loss2.cuda()
+
+
+            total_loss = total_loss / (1.0 * adv_steps)
+
+            self.free_optimize(total_loss)  # optimize
+
+            
+            if astep == adv_steps - 1:
+                # further updates on delta
+                break
+
+            embeds_init1, delta1 = self.update_freelb_delta(model, delta1, embeds_init1, x1.transpose(0, 1))
+            if task_name == "i2t":
+                embeds_init2, delta2 = self.update_freelb_delta(model, delta2, embeds_init2, x2.transpose(0, 1))
+            image_delta = self.update_image_freelb_delta(x_img, image_delta)
+
+        self.n_sentences += params.batch_size
+        self.stats['processed_s'] += len1.size(0)
+        self.stats['processed_w'] += len1.sum().item()
+
+    def ntg_step(self, lang1='en', lang2=None, lambda_coeff=1):
+        """
+        Cross-modal Caption generation step
+        Can also be used for denoising auto-encoding.
+        """
+        assert lambda_coeff >= 0
+        if lambda_coeff == 0:
+            return
+        params = self.params
+        name = 'model' if params.encoder_only else 'encoder'
+        model = getattr(self, name)
+        model.train()
+
+        (x1, len1), (x2, len2) = self.get_cross_lingual_batch('ntg', lang1, None)
+
+        lang1_id = params.lang2id[lang1]
+        lang2_id = params.lang2id[lang1]
+        langs1 = x1.clone().fill_(lang1_id)
+        langs2 = x2.clone().fill_(lang2_id)
+
+        # target words to predict
+        alen = torch.arange(len2.max(), dtype=torch.long, device=len2.device)
+        pred_mask = alen[:, None] < len2[None] - 1  # do not predict anything given the last target word
+        y = x2[1:].masked_select(pred_mask[:-1])  # decide whether or not  predict
+        assert len(y) == (len2 - 1).sum().item()
+
+        # cuda
+        x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
+
+        # encode source sentence
+        enc1 = model('crossfwd', stream_='text', x=x1, lengths=len1, langs=langs1, causal=False)
+        enc1 = enc1.transpose(0, 1)
+
+        # decode target sentence
+        dec2 = model('crossfwd', stream_='text', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1,
+                     src_len=len1)
+
+        # loss
+        # the last word not apply prediction logic
+        _, loss = model('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False)
+        self.stats[('NTG-%s' % lang1)].append(loss.item())
+        loss = lambda_coeff * loss
+
+        # optimize
+        self.optimize(loss)
+
+        # number of processed sentences / words
+        self.n_sentences += params.batch_size
+        self.stats['processed_s'] += len2.size(0)
+        self.stats['processed_w'] += (len2 - 1).sum().item()
+
+
+
+    def slide_step(self, dataset='slide', input_stream='img', lambda_coeff=1):
+        """
+        Cross-modal slide understanding task
+        Can also be used for denoising auto-encoding.
+        """
+        assert lambda_coeff >= 0
+        if lambda_coeff == 0:
+            return
+        params = self.params
+        name = 'model' if params.encoder_only else 'encoder'
+        model = getattr(self, name)
+        model.train()
+
+
+        (x2, len2), (x1, x1_mask, img_loc, img_id), labels= self.get_batch('slide2img', dataset, input_stream)
+        # convert fp16
+        #assign lang ids
+        # follow uvp
+
+        img_len = x1_mask.sum(dim=1)
+        x_img = x1.transpose(0, 1)
+        img_loc = img_loc.transpose(0, 1)
+
+        x2, len2, x_img, img_loc, img_len = to_cuda(x2, len2, x_img, img_loc, img_len)
+
+        encoder_outputs = model('jointfwd', x=x2, lengths=len2, x_img=x_img, lengths_img=img_len, causal=False,
+                                langs=None,
+                                image_loc=img_loc, refine_image=params.refine_image)
+
+        encoder_outputs = encoder_outputs.transpose(0, 1)
+
+        relation_scores = model('predict', tensor=encoder_outputs, is_relation=True)
+
+        # loss
+        # the last word not apply prediction logic
+        s2 = torch.from_numpy(np.array(labels, dtype='float32')).view(-1)
+        loss = F.binary_cross_entropy_with_logits(relation_scores.view(-1).cpu(),
+                                                     s2)
+
+
+        self.stats[('SLIDE-%s' % (input_stream))].append(loss.item())
+        loss = lambda_coeff * loss
+
+        # optimize
+        self.optimize(loss)
+
+        # number of processed sentences / words
+        self.n_sentences += params.batch_size
+        self.stats['processed_s'] += len2.size(0)
+        self.stats['processed_w'] += (len2 - 1).sum().item()
+
+    def deal_freelb_delta(self, model, input_ids,input_lengths,adv_init_mag=1e-4,norm_type="l2"):
+
+        if isinstance(model, torch.nn.DataParallel) or isinstance(model, nn.parallel.DistributedDataParallel) or isinstance(model,apex.parallel.DistributedDataParallel):
+            embeds_init = model.module.embeddings(input_ids)
+        else:
+            embeds_init = model.embeddings(input_ids)
+
+        #
+        # embeds_init = model.embeddings(input_ids)
+
+        if adv_init_mag > 0:
+            # check the shape of the mask here..
+            if norm_type == "l2":
+                delta = torch.zeros_like(embeds_init).uniform_(-1, 1)
+                dims = input_lengths * embeds_init.size(-1)
+                mag = adv_init_mag / torch.sqrt(dims.float())
+                delta = (delta * mag.view(-1, 1, 1)).detach()
+            elif norm_type == "linf":
+                delta = torch.zeros_like(embeds_init).uniform_(-adv_init_mag,
+                                                               adv_init_mag)
+        else:
+            delta = torch.zeros_like(embeds_init)
+        return embeds_init, delta
+
+    def deal_image_freelb_delta(self, image_feature,adv_init_mag=1e-4,norm_type="l2"):
+        if adv_init_mag > 0:
+            if norm_type == "l2":
+                delta = torch.zeros_like(image_feature).uniform_(-1, 1)
+                dims = torch.ones([image_feature.size(0), 1]).cuda() * image_feature.size(-1)
+                mag =  adv_init_mag / torch.sqrt(dims)
+                delta = (delta * mag.view(-1, 1,1)).detach()
+            elif norm_type == "linf":
+                delta = torch.zeros_like(image_feature).uniform_(-adv_init_mag, adv_init_mag)
+        else:
+            delta = torch.zeros_like(image_feature)
+        return delta
+
+    def get_ic_output(self,params,model,x2,len2,x1,len1,img_loc,langs,langs_img,pred_mask,y,adv_text_embed):
+
+        # encode source sentence
+        enc1 = model('crossfwd', stream_='img', x=x1, lengths=len1, langs=langs_img, causal=False, cross_modal=True,
+                     image_loc=img_loc, refine_image=params.refine_image, refine_encoder=params.refine_encoder,
+                     image_dist=None)
+        enc1 = enc1.transpose(0, 1)
+
+        # decode target sentence
+        dec2 = model('crossfwd', stream_='text', x=x2, lengths=len2, langs=langs, causal=True, src_enc=enc1,
+                     src_len=len1,text_embed=adv_text_embed)
+
+        # loss
+        # the last word not apply prediction logic
+        _, loss = model('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False)
+
+        return loss,dec2
+
+    def free_optimize(self, loss):
+        """
+        Optimize.
+        """
+        # check NaN
+            # exit()
+        params = self.params
+        # optimizers
+        names = self.optimizers.keys()
+        optimizers = [self.optimizers[k] for k in names]
+        # regular optimization
+        if params.amp == -1:
+            for optimizer in optimizers:
+                optimizer.zero_grad()
+            loss.backward()
+            if params.clip_grad_norm > 0:
+                for name in names:
+                    # norm_check_a = (sum([p.grad.norm(p=2).item() ** 2 for p in self.parameters[name]])) ** 0.5
+                    clip_grad_norm_(self.parameters[name], params.clip_grad_norm)
+
+            for optimizer in optimizers:
+                optimizer.step()
+        # AMP optimization
+        else:
+            if self.n_iter % params.accumulate_gradients == 0:
+                with apex.amp.scale_loss(loss, optimizers) as scaled_loss:
+                    scaled_loss.backward()
+                if params.clip_grad_norm > 0:
+                    for name in names:
+                        # norm_check_a = (sum([p.grad.norm(p=2).item() ** 2 for p in apex.amp.master_params(self.optimizers[name])])) ** 0.5
+                        clip_grad_norm_(apex.amp.master_params(self.optimizers[name]), params.clip_grad_norm)
+                for optimizer in optimizers:
+                    optimizer.step()
+                    optimizer.zero_grad()
+            else:
+                with apex.amp.scale_loss(loss, optimizers, delay_unscale=True) as scaled_loss:
+                    scaled_loss.backward()
+
+    def update_freelb_delta(self, model, delta, embeds_init, input_ids,norm_type ="l2",adv_lr=1e-3,adv_max_norm=1e-2):
+        delta_grad = delta.grad.clone().detach()
+
+        # (3) update and clip
+        if norm_type == "l2":
+            denorm = torch.norm(delta_grad.view(delta_grad.size(0), -1), dim=1).view(-1, 1, 1)
+            denorm = torch.clamp(denorm, min=1e-8)
+            delta = (delta + adv_lr * delta_grad / denorm).detach()
+            if adv_max_norm > 0:
+                delta_norm = torch.norm(delta.view(delta.size(0), -1).float(), p=2, dim=1).detach()
+                exceed_mask = (delta_norm > adv_max_norm).to(embeds_init)
+                reweights = (adv_max_norm / delta_norm * exceed_mask + (1 - exceed_mask)).view(-1, 1, 1)
+                delta = (delta * reweights).detach()
+        elif norm_type == "linf":
+            denorm = torch.norm(delta_grad.view(delta_grad.size(0), -1), dim=1, p=float("inf")).view(-1, 1, 1)
+            denorm = torch.clamp(denorm, min=1e-8)
+            delta = (delta + adv_lr * delta_grad / denorm).detach()
+            if adv_max_norm > 0:
+                delta = torch.clamp(delta, -adv_max_norm, adv_max_norm).detach()
+        else:
+            raise NotImplementedError("Norm type {} not specified.".format(norm_type))
+
+        # if isinstance(model, torch.nn.DataParallel) or isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        #     embeds_init = model.module.encoder.embeddings.word_embeddings(input_ids)
+        # else:
+        #     embeds_init = model.encoder.embeddings.word_embeddings(input_ids)
+
+
+        if isinstance(model, torch.nn.DataParallel) or isinstance(model, nn.parallel.DistributedDataParallel) or isinstance(model,apex.parallel.DistributedDataParallel):
+            embeds_init = model.module.embeddings(input_ids)
+        else:
+            embeds_init = model.embeddings(input_ids)
+
+        # embeds_init = model.embeddings(input_ids)
+        return embeds_init, delta
+
+    def update_image_freelb_delta(self, image_embeds, delta,norm_type ="l2",adv_lr=1e-3,adv_max_norm=1e-2):
+        delta_grad = delta.grad.clone().detach()
+
+        # (3) update and clip
+        if norm_type == "l2":
+            denorm = torch.norm(delta_grad.view(delta_grad.size(0), -1), dim=1).view(-1, 1)
+            denorm = torch.clamp(denorm, min=1e-8)
+            delta = (delta + adv_lr * delta_grad / denorm.view(-1, 1, 1)).detach()
+            if adv_max_norm > 0:
+                delta_norm = torch.norm(delta.reshape(delta.size(0), -1).float(), p=2, dim=1).detach()
+                exceed_mask = (delta_norm > adv_max_norm).to(image_embeds)
+                reweights = (adv_max_norm / delta_norm * exceed_mask + (1 - exceed_mask)).view(-1, 1,1)
+                delta = (delta * reweights).detach()
+        elif norm_type == "linf":
+            denorm = torch.norm(delta_grad.view(delta_grad.size(0), -1), dim=1, p=float("inf")).view(-1, 1)
+            denorm = torch.clamp(denorm, min=1e-8)
+            delta = (delta + adv_lr * delta_grad / denorm).detach()
+            if adv_max_norm > 0:
+                delta = torch.clamp(delta, -adv_max_norm, adv_max_norm).detach()
+        else:
+            raise NotImplementedError("Norm type {} not specified.".format(norm_type))
+
+        return delta
+
+    def free_lb_ic_step(self, dataset='coco', input_stream='img', lambda_coeff=1):
+        """
+        Cross-modal Caption generation step
+        Can also be used for denoising auto-encoding.
+        """
+        assert lambda_coeff >= 0
+        if lambda_coeff == 0:
+            return
+        params = self.params
+        name = 'model' if params.encoder_only else 'encoder'
+        model = getattr(self, name)
+        model.train()
+
+
+        (x2, len2), (x1, x1_mask, img_loc, img_id) = self.get_batch('txt2img', dataset, input_stream)
+
+        if len(params.ft_lgs) > 0:
+            lang1_id = params.lang2id[params.ft_lgs[0]]
+            langs = x2.clone().fill_(lang1_id)
+        else:
+            lang1_id = params.lang2id['en']
+            langs = x2.clone().fill_(lang1_id)
+
+            # target words to predict
+        alen = torch.arange(len2.max(), dtype=torch.long, device=len2.device)
+        pred_mask = alen[:, None] < len2[None] - 1  # do not predict anything given the last target word
+        y = x2[1:].masked_select(pred_mask[:-1])  # decide whether or not  predict
+        assert len(y) == (len2 - 1).sum().item()
+
+        #
+        len1 = x1_mask.sum(dim=1)
+        x1 = x1.transpose(0, 1)
+        img_loc = img_loc.transpose(0, 1)
+        if len(params.ft_lgs) > 0:
+            lang1_id = params.lang2id[params.ft_lgs[0]]
+            langs_img = x1_mask.transpose(0, 1).clone().fill_(lang1_id)
+        else:
+            lang1_id = params.lang2id['en']
+            langs_img = x1_mask.transpose(0, 1).clone().fill_(lang1_id)
+
+        # cuda
+
+        x1, len1, img_loc, x2, len2, y, x1_mask, langs, langs_img = to_cuda(x1, len1, img_loc, x2, len2, y, x1_mask,
+                                                                            langs, langs_img)
+
+        # convert fp16
+        #assign lang ids
+
+        #free lb
+        if params.free_text:
+            embeds_init, delta = self.deal_freelb_delta(model,x2.transpose(0,1),len2)
+        if params.free_img:
+            image_delta = self.deal_image_freelb_delta(x1)
+
+        # the main loop
+        dp_masks = None
+        adv_steps=3
+        tr_loss, tb_loss = 0.0, 0.0
+        for astep in range(adv_steps):
+            # (0) forward
+            text_imb = None
+            if params.free_text:
+                delta.requires_grad_()
+                text_imb = delta + embeds_init
+            img_imb = x1
+            if params.free_img:
+                image_delta.requires_grad_()
+                img_imb = x1 + image_delta
+
+            output = self.get_ic_output(params,model,x2,len2,img_imb,len1,img_loc,langs,langs_img,pred_mask,y,text_imb)
+            loss, dec_out = output[0], output[1]
+
+
+            # (1) backward
+
+            # if params.n_gpu_per_node > 1:
+            #     loss = loss.mean()  # mean() to average on multi-gpu parallel training
+            # if params.accumulate_gradients > 1:
+            #     loss = loss / params.accumulate_gradients
+
+            loss = loss /(1.0*adv_steps)
+
+            self.free_optimize(loss)
+
+            tb_loss+=loss.item()
+            #
+            # self.free_optimize(loss,adv_steps)
+
+            if astep == adv_steps - 1:
+                # further updates on delta
+                break
+
+            # update delta
+            if params.free_text:
+                embeds_init, delta = self.update_freelb_delta(model, delta, embeds_init, x2.transpose(0,1))
+            if params.free_img:
+                image_delta = self.update_image_freelb_delta(x1, image_delta)
+
+        # loss = tr_loss+tb_loss
+
+        self.stats[('FRLB-IC-%s-%s' % (dataset, input_stream))].append(tb_loss)
+        loss = lambda_coeff * loss
+
+        # optimize
+        # self.free_optimize(None,True)
+
+        # number of processed sentences / words
+        self.n_sentences += params.batch_size
+        self.stats['processed_s'] += len2.size(0)
+        self.stats['processed_w'] += (len2 - 1).sum().item()

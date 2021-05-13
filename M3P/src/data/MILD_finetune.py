@@ -1,5 +1,5 @@
-# Copyright (c) Microsoft Corporation. All rights reserved.
-# Licensed under the MIT License.
+# Copyright (c) 2019-present, Facebook, Inc.
+# All rights reserved.
 #
 # This source code is licensed under the license found in the
 # NOTICE FILE in the root directory of this source tree.
@@ -266,15 +266,11 @@ class MILDRetrievalDataset(Dataset):
 
 
         self.en_len = 110000
-        # finetune on all implementation: each gpu training a single language each time
         self.ft_lg = params.ft_lgs[0]  # only use one
-        _local_rank = params.local_rank
-        _select_lg = _local_rank % len(params.ft_lgs)
-        self.ft_lg = params.ft_lgs[_select_lg]
         #whether fintune on all
         self.is_ft_all= False
-        #if len(params.ft_lgs)>1:
-        #    self.is_ft_all = True
+        if len(params.ft_lgs)>1:
+            self.is_ft_all = True
         assert data_type in ['mild']
         if data_type == 'mild':
             # open the hdf5 file for image features
@@ -315,7 +311,7 @@ class MILDRetrievalDataset(Dataset):
             img_id = int(img_id)
             cur_cap_list = []
             if len(self.ft_lgs)>0:
-                for lg in [self.ft_lg]:
+                for lg in self.ft_lgs:
                     if img_id not in self.captions[lg]:
                         continue
                     for cap in self.captions[lg][img_id]:
@@ -464,13 +460,11 @@ class MILDRetrievalDataset(Dataset):
         cur_lg = self.ft_lg
         for img_index in sample_indices:
             # assign same sentence with each image
-            # concat caption and passage
+            #concat caption and passage
 
             att_feat, box_feat, img_mask, obj_label,img_id = self.get_img_feature(img_index)
 
             if self.params.qp_type != 'q':
-                # when input type is qp, using <Q,I,C> pair as input
-                # assign I(image) and C(paired context sentence) to query 
                 _cur_caps = self.raw_caps[sent_id]+' </s> '+ self.captions[cur_lg][img_id][0][1]
                 sent.append(self.tokenize(_cur_caps))
             else:
@@ -521,13 +515,11 @@ class MILDRetrievalDataset(Dataset):
 
         img_index = sent_id//self.seq_per_img
         cur_lg = self.ft_lg
-        for cur_caption in sample_captions:  # sample negative query
-            att_feat, box_feat, img_mask, obj_label,img_id = self.get_img_feature(img_index) # same image for all negative query
+        for cur_caption in sample_captions:  # sample captions
+            att_feat, box_feat, img_mask, obj_label,img_id = self.get_img_feature(img_index)
 
-            if self.params.qp_type != 'q':               
-                # when input type is qp, using <Q,I,C> pair as input
-                # assign negative query, while keeping I(image) and C(paired context sentence) as original
-                _cur_caps = cur_caption + ' </s> ' + self.captions[cur_lg][img_id][0][1] # same C(paired context sentence) with same image
+            if self.params.qp_type != 'q':
+                _cur_caps = cur_caption + ' </s> ' + self.captions[cur_lg][img_id][0][1]
                 sent.append(self.tokenize(_cur_caps))
             else:
                 sent.append(self.tokenize(cur_caption))
@@ -848,9 +840,8 @@ class MILDEvaluateRetrievalDataset(Dataset):
 
             #all query
             _query_dict = {}
-            for img_id in self.image_ids:  
-                # get C(context sentence) for each image
-                # each img_id contains different total capitons list
+            for img_id in self.image_ids:  # each img_id contains different total capitons list
+                # get page
                 cur_cap_list = list(self.captions[img_id])
                 if len(cur_cap_list) > seq_per_img:
                     np.random.shuffle(cur_cap_list)
@@ -867,7 +858,6 @@ class MILDEvaluateRetrievalDataset(Dataset):
                         _query_dict[img_id] = [_sent_cap]
                     else:
                         _query_dict[img_id].append(_sent_cap)
-            #all page(context sentence for each image)
             _pag_dict = {}
             for img_id in self.image_ids:
                 cur_cap_list = list(self.captions[img_id])
@@ -880,7 +870,6 @@ class MILDEvaluateRetrievalDataset(Dataset):
             for a_img_id in self.image_ids:
                 for img_id in self.image_ids:  # each img_id contains different total capitons list
                     for _cur_q in _query_dict[img_id]:
-                        # concat query and page(context sentence) together
                         _tokens = list(_cur_q)+list(_pag_dict[a_img_id])
                         _tokens =  np.int32(_tokens)
                         raw_caps.append(_tokens)

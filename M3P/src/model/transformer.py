@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation. All rights reserved.
-# Licensed under the MIT License.
-#
 # Copyright (c) 2019-present, Facebook, Inc.
 # All rights reserved.
 #
@@ -545,6 +542,7 @@ class LatentDecoder(nn.Module):
         original_output = self.activation(original_output)
         return original_output
 
+
 class BertPooler(nn.Module):
     def __init__(self, hidden_size):
         super(BertPooler, self).__init__()
@@ -558,6 +556,8 @@ class BertPooler(nn.Module):
         pooled_output = self.dense(first_token_tensor)
         pooled_output = self.activation(pooled_output)
         return pooled_output
+
+
 
 class ObjPredLayer(nn.Module):
     """
@@ -589,6 +589,7 @@ class ObjPredLayer(nn.Module):
         """
         assert x.dim() == 2
         return self.proj.log_prob(x) if self.asm else self.proj(x)
+
 
 
 class BertPredictionHeadTransform(nn.Module):
@@ -661,6 +662,7 @@ class TransformerModel(nn.Module):
         self.refine_embeddings = AoA_Refiner_Core(self.n_heads, self.dim, self.hidden_dim,n_layers=params.refine_layers)
 
         #we set
+
         self.cross_alignment = CrossAlignMatrix(self.dim, 1, self.dim)
 
         # transformer layers
@@ -677,6 +679,15 @@ class TransformerModel(nn.Module):
         self.use_externel_att = params.use_externel_att
 
 
+        #joint space transform
+        self.latent_transforms = nn.ModuleList()
+        for i in range(2): #image gap and language gap distribution
+            self.latent_transforms.append(VaeEncoder(self.dim,self.dim))
+
+        self.original_transforms = nn.ModuleList()
+        for i in range(2):
+            self.original_transforms.append(LatentDecoder(self.dim))
+
         for _ in range(self.n_layers):
             self.attentions.append(
                     MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
@@ -685,7 +696,14 @@ class TransformerModel(nn.Module):
             self.layer_norm15.append(nn.LayerNorm(self.dim, eps=1e-12))
             # if self.english_only is True:
             self.encoder_attn.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
-
+            # elif self.attention_setting == "v1":
+            #     self.encoder_attn.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout,
+                #                                                 n_langs=self.n_langs))
+                # else:
+                #     self.encoder_attn.append(nn.ModuleList([
+                #         MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout)
+                #         for i in range(self.n_langs)
+                #     ]))
             self.ffns.append(TransformerFFN(self.dim, self.hidden_dim, self.dim, dropout=self.dropout,
                                             gelu_activation=params.gelu_activation))
             self.layer_norm2.append(nn.LayerNorm(self.dim, eps=1e-12))
@@ -694,10 +712,14 @@ class TransformerModel(nn.Module):
         self.pooled_layer = BertPooler(self.dim)
         self.seq_relationship = nn.Linear(self.dim, 1)  # visual-linguistic matching
 
+        self.pooled_layer2 = BertPooler(self.dim)
+        self.seq_relationship2 = nn.Linear(self.dim, 1)  # clcm
+
         self.mrfr_dense = nn.Linear(self.dim, 2048, bias=True)
 
         #for obj prediction
         self.transformer_obj = BertPredictionHeadTransform(self.dim)
+
 
         # output layer
         if self.with_output:
@@ -711,17 +733,150 @@ class TransformerModel(nn.Module):
         Forward function with different forward modes.
         ### Small hack to handle PyTorch distributed.
         """
-        if mode=='crossfwd':
+        if mode == 'fwd':
+            return self.fwd(**kwargs)
+        elif mode=='ImageEmbed':
+            return self.ImageEmbedding(**kwargs)
+        elif mode=='crossfwd':
             return self.crossfwd(**kwargs)
         elif mode=='jointfwd':
             return self.jointfwd(**kwargs)
         elif mode == 'predict':
             return self.predict(**kwargs)
+        elif mode=='GAN':
+            return self.GAN(**kwargs)
+        elif mode=='transform':
+            return self.transform_original(**kwargs)
         else:
             raise Exception("Unknown mode: %s" % mode)
 
+    def fwd(self, x, lengths, causal, src_enc=None, src_len=None, positions=None, langs=None, cache=None, enc_mask=None,
+            cross_modal=False, image_loc=None,
+            refine_image=False, refine_encoder=False,image_fusion=False,image_enc=None,image_mask=None,
+            image_dist=None):
+        """
+        Inputs:
+            `x` LongTensor(slen, bs), containing word indices
+            `lengths` LongTensor(bs), containing the length of each sentence
+            `causal` Boolean, if True, the attention is only done over previous hidden states
+            `positions` LongTensor(slen, bs), containing word positions
+            `langs` LongTensor(slen, bs), containing language IDs
+            'refine_image'  refine module after image embeddings
+            'refine_encoder' refine module after encoder
+
+            'image_fusion': whether fusion image into text
+            'image_enc': fusion image embedding
+            'image_mask' fusion image mask
+
+            encoder/decoder can only be seperated into this
+        """
+        # lengths = (x != self.pad_index).float().sum(dim=1)
+        # mask = x != self.pad_index
+
+        # check inputs
+
+        if cross_modal:
+            slen, bs = x.size()[0], x.size()[1]
+        else:
+            slen, bs = x.size()
+        assert lengths.size(0) == bs
+        assert lengths.max().item() <= slen
+        x = x.transpose(0, 1)  # batch size as dimension 0
+        assert (src_enc is None) == (src_len is None)
+        if src_enc is not None:
+            assert self.is_decoder
+            assert src_enc.size(0) == bs
+
+        # generate masks
+        mask, attn_mask = get_masks(slen, lengths, causal)
+        if self.is_decoder and src_enc is not None:
+            src_mask = torch.arange(src_len.max(), dtype=torch.long, device=lengths.device) < src_len[:, None]
+            if enc_mask is not None:
+                src_mask &= enc_mask
+
+        # positions
+        if positions is None:
+            positions = x.new(slen).long()
+            positions = torch.arange(slen, out=positions).unsqueeze(0)
+        else:
+            assert positions.size() == (slen, bs)
+            positions = positions.transpose(0, 1)
+
+        # langs
+        if langs is not None and not cross_modal:
+            assert langs.size() == (slen, bs)
+            langs = langs.transpose(0, 1)
+
+        # do not recompute cached elements
+        if cache is not None:
+            _slen = slen - cache['slen']
+            x = x[:, -_slen:]
+            positions = positions[:, -_slen:]
+            if langs is not None and not cross_modal:
+                langs = langs[:, -_slen:]
+            mask = mask[:, -_slen:]
+            attn_mask = attn_mask[:, -_slen:]
+
+        # embeddings
+        if cross_modal:
+            tensor = self.image_embeddings(x, image_loc.transpose(0, 1),image_dist)
+        else:
+            tensor = self.embeddings(x)
+            tensor = tensor + self.position_embeddings(positions).expand_as(tensor)
+
+            tensor = self.layer_norm_emb(tensor)
+            tensor = F.dropout(tensor, p=self.dropout, training=self.training)
+            lang_id = langs.max() if langs is not None else None
+
+        tensor *= mask.unsqueeze(-1).to(tensor.dtype)
+
+        # wether refine embeddings as applying encoding
+        if cross_modal and refine_image and not self.is_decoder:
+            tensor = self.refine_embeddings(tensor, attn_mask)
+
+
+        if image_fusion and image_enc is not None and image_mask is not None:
+            tensor = self.cross_alignment(tensor,image_enc,attn_mask,image_mask)
+
+        # transformer layers
+        for i in range(self.n_layers):
+            # self attention
+            attn = self.attentions[i](tensor, attn_mask, cache=cache)
+            attn = F.dropout(attn, p=self.dropout, training=self.training)
+            tensor = tensor + attn
+            tensor = self.layer_norm1[i](tensor)
+
+            # encoder attention (for decoder only)
+            if self.is_decoder and src_enc is not None:
+                if self.english_only is True:
+                    attn = self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache)
+                elif self.attention_setting == "v1":
+                    attn = self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache, segment_label=lang_id)
+                else:
+                    attn = self.encoder_attn[i][lang_id](tensor, src_mask, kv=src_enc, cache=cache)
+                attn = F.dropout(attn, p=self.dropout, training=self.training)
+                tensor = tensor + attn
+                tensor = self.layer_norm15[i](tensor)
+
+            # FFN
+            tensor = tensor + self.ffns[i](tensor)
+            tensor = self.layer_norm2[i](tensor)
+            tensor *= mask.unsqueeze(-1).to(tensor.dtype)
+
+        # update cache length
+        if cache is not None:
+            cache['slen'] += tensor.size(1)
+
+        if cross_modal and refine_encoder:
+            tensor = self.refine_embeddings(tensor, attn_mask)
+
+        # move back sequence length to dimension 0
+        tensor = tensor.transpose(0, 1)
+
+        return tensor
+
     def jointfwd(self, x, lengths, x_img,lengths_img,causal=False,positions=None, langs=None,
-                image_loc=None,refine_image=False,is_latent=False):
+                image_loc=None,refine_image=False,is_latent=False,text_embed=None):
         """
         :param x: text input
         :param lengths: text length
@@ -729,10 +884,10 @@ class TransformerModel(nn.Module):
         :param lengths_img:  img length 100
         :param causal: not for generation masks
         :param positions: need to update with img length
-        :param langs:  lang's ids not use for jointfwd
-        :param image_loc: image location features 5-D
-        :param refine_image: whether use AOA Refine module
-        :param is_latent : not use now
+        :param langs: [ en en en .... img img img]
+        :param image_loc:
+        :param refine_image:
+        :param is_latent : whether use latent space to construct embedding space
         :return:
         """
 
@@ -747,18 +902,28 @@ class TransformerModel(nn.Module):
 
         # get img masks
         img_mask, img_attn_mask = get_masks(img_tensor.size()[1], lengths_img, False)
-        # if refine_image:
-        #     img_tensor = self.refine_embeddings(img_tensor, img_attn_mask)
+        if refine_image:
+            img_tensor = self.refine_embeddings(img_tensor, img_attn_mask)
 
 
         #text and combine image and text
-        tensor = self.embeddings(x)
+        if text_embed is not None:
+            tensor = text_embed
+        else:
+            tensor = self.embeddings(x)
 
 
         c_slen = img_tensor.size()[1]+slen
         cat_length = torch.add(lengths_img,lengths)
 
         mask, self_attn_masks = get_masks(c_slen, cat_length, causal) #[B,IMG+SENT,IMG+SENT]
+
+        # if is_latent:
+        #     original_img = img_tensor.clone()
+        #     original_text = tensor.clone()
+        #
+        #     img_tensor, img_kld = self.latent_transforms[0](img_tensor,img_tensor)
+        #     tensor, text_kld = self.latent_transforms[1](tensor,tensor)  # transform to latent space
 
 
         tensor = torch.cat([img_tensor, tensor], dim=1)#[B,IMG+SENT,DIM]
@@ -792,6 +957,10 @@ class TransformerModel(nn.Module):
             tensor = self.layer_norm2[i](tensor)
             tensor *= mask.unsqueeze(-1).to(tensor.dtype)
 
+        #trunct to text length
+        # tensor = tensor[:,img_tensor.size()[1]:,:]
+
+        # move back sequence length to dimension 0
         tensor = tensor.transpose(0, 1)
         #
         # if is_latent:
@@ -799,7 +968,9 @@ class TransformerModel(nn.Module):
         return tensor
 
     def crossfwd(self, x, lengths, causal, stream_='text',src_enc=None, src_len=None, positions=None, langs=None, cache=None, enc_mask=None,
-                image_loc=None,refine_image=False, refine_encoder=False,image_dist=None):
+                image_loc=None,refine_image=False, refine_encoder=False,image_fusion=False,image_enc=None,image_mask=None,cross_modal=True,
+                 image_dist=None,is_latent=False,text_embed=None
+                 ):
         """
         Inputs:
             `x` LongTensor(slen, bs), containing word indices
@@ -815,6 +986,9 @@ class TransformerModel(nn.Module):
             'image_mask' fusion image mask
 
             "stream_' :text or img
+
+            text_embed freeLb set
+            img_embed=None freelb set
         """
         # lengths = (x != self.pad_index).float().sum(dim=1)
         # mask = x != self.pad_index
@@ -874,7 +1048,10 @@ class TransformerModel(nn.Module):
             #tensor = self.layer_norm_emb(tensor)
             tensor = F.dropout(tensor, p=self.dropout, training=self.training)
         else:
-            tensor = self.embeddings(x)
+            if text_embed is not None:
+                tensor = text_embed
+            else:
+                tensor = self.embeddings(x)
             tensor = tensor + self.position_embeddings(positions).expand_as(tensor)
             if langs is not None:  # currently we set langs=None
                 tensor = tensor + self.cross_lang_embeddings(langs)  #[en fr de ....img]
@@ -884,12 +1061,12 @@ class TransformerModel(nn.Module):
 
         tensor *= mask.unsqueeze(-1).to(tensor.dtype)
 
-        # # wether refine embeddings as applying encoding
-        # if stream_=='img' and refine_image:
-        #     tensor = self.refine_embeddings(tensor, attn_mask)
-        #
-        # if image_fusion and image_enc is not None and image_mask is not None:
-        #     tensor = self.cross_alignment(tensor,image_enc,attn_mask,image_mask)
+        # wether refine embeddings as applying encoding
+        if stream_=='img' and refine_image:
+            tensor = self.refine_embeddings(tensor, attn_mask)
+
+        if image_fusion and image_enc is not None and image_mask is not None:
+            tensor = self.cross_alignment(tensor,image_enc,attn_mask,image_mask)
 
         # transformer layers
         for i in range(self.n_layers):
@@ -901,11 +1078,23 @@ class TransformerModel(nn.Module):
             tensor = tensor + attn
             tensor = self.layer_norm1[i](tensor)
 
+            # if causal and src_enc is not None and self.use_externel_att==False:
+            #     attn = self.attentions[i](tensor, src_mask, kv=src_enc, cache=cache,id_plus=True,segment_label=lang_id)
+            #     attn = F.dropout(attn, p=self.dropout, training=self.training)
+            #     tensor = tensor + attn
+            #     tensor = self.layer_norm1[i](tensor)
+            # el
             if causal and src_enc is not None:
                 attn = self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache)
                 attn = F.dropout(attn, p=self.dropout, training=self.training)
                 tensor = tensor + attn
                 tensor = self.layer_norm15[i](tensor)
+            # elif causal==False and src_enc is not None:
+            #     #for understanding
+            #     attn = self.attentions[i](tensor, src_mask, kv=src_enc, cache=cache,id_plus=True)
+            #     attn = F.dropout(attn, p=self.dropout, training=self.training)
+            #     tensor = tensor + attn
+            #     tensor = self.layer_norm1[i](tensor)
 
             # FFN
             tensor = tensor + self.ffns[i](tensor)
@@ -919,11 +1108,80 @@ class TransformerModel(nn.Module):
         # move back sequence length to dimension 0
         tensor = tensor.transpose(0, 1)
 
+        # if is_latent:
+        #     return tensor,original_embedding,_kld
 
         return tensor
 
+
+    def ImageEmbedding(self,x,lengths, causal,image_loc=None,
+            refine_image=True, refine_encoder=False,image_dist=None):
+        slen, bs = x.size()[0], x.size()[1]
+
+        assert lengths.size(0) == bs
+        assert lengths.max().item() <= slen
+        x = x.transpose(0, 1)  # batch size as dimension 0
+
+        # generate masks
+        mask, attn_mask = get_masks(slen, lengths, causal)
+
+        # embeddings
+        tensor = self.image_embeddings(x, image_loc.transpose(0, 1),image_dist)
+
+        tensor *= mask.unsqueeze(-1).to(tensor.dtype)
+
+        # wether refine embeddings as applying encoding
+        if refine_image:
+            tensor = self.refine_embeddings(tensor, attn_mask)
+
+        return tensor,attn_mask
+
+    def GAN(self,x,x_img,x_noise):
+        """
+        :param x:  text input
+        :param x_img:  real img input
+        :return:
+        """
+
+        # Extract latent_z corresponding to captions
+        z, kld = self.text_vae(x)
+        kld = kld.mean()
+
+        z_img,kld_img = self.image_vae(x_img)
+        kld_img = kld_img.mean()
+
+        #Extract fake image corresponding to its captions
+        x_f = self.image_generator(z)
+
+        # Extract fake images corresponding to noise
+        x_p = self.image_generator(x_noise)
+
+        # Extract real images corresponding to its image
+        x_r = self.image_generator(torch.mean(x_img,dim=1))
+
+        # Extract fake images corresponding to its latent
+        x_i = self.image_generator(z_img)
+
+        mm_text = torch.mean(x,dim=1)
+        mm_text = mm_text.unsqueeze(2).unsqueeze(-1)
+
+        # Compute D(x) for real and fake images along with their captions
+        ld_r, fd_r = self.image_discriminator(x_r,mm_text)
+        ld_f, fd_f = self.image_discriminator(x_f,mm_text)
+        ld_p, fd_p = self.image_discriminator(x_p,mm_text)
+        ld_i, fd_i = self.image_discriminator(x_i,mm_text)
+
+        return kld,kld_img,ld_r,ld_f,ld_i,ld_p,fd_r,fd_f,fd_i,x_r,x_f,x_i
+
+    def transform_original(self,tensor,stream='text'):
+        # if stream == 'text':
+        #     tensor = self.original_transforms[1](tensor)
+        # else:
+        #     tensor = self.original_transforms[0](tensor)
+        return tensor
+
     def predict(self, tensor, pred_mask=None, y=None, get_scores=None,is_obj=False,is_relation=False,is_mrfr=False,
-                ):
+                is_clcm=False):
         """
         Given the last hidden state, compute word scores and/or the loss.
             `pred_mask` is a ByteTensor of shape (slen, bs), filled with 1 when
@@ -936,6 +1194,10 @@ class TransformerModel(nn.Module):
         if is_relation:
             enc2_pooled = self.pooled_layer(tensor)
             relation_scores = self.seq_relationship(enc2_pooled)
+            return relation_scores
+        if is_clcm:
+            enc2_pooled = self.pooled_layer2(tensor)
+            relation_scores = self.seq_relationship2(enc2_pooled)
             return relation_scores
         if is_mrfr:
             mrfr_out = self.mrfr_dense(tensor)

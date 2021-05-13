@@ -1,5 +1,5 @@
-# Copyright (c) Microsoft Corporation. All rights reserved.
-# Licensed under the MIT License.
+# Copyright (c) 2019-present, Facebook, Inc.
+# All rights reserved.
 #
 # This source code is licensed under the license found in the
 # NOTICE FILE in the root directory of this source tree.
@@ -297,7 +297,7 @@ class CaptionDataset(Dataset):
         return img_feas
 
 class RetrievalDataset(Dataset):
-    def __init__(self, caption_dict, params, mode='train', data_type='coco'):
+    def __init__(self, caption_dict, clager, params, mode='train', data_type='coco'):
         # diy dataset, image_ids is equal to all captions, each image with 5 caption
         #support multi language age
         self.eos_index = params.eos_index
@@ -307,6 +307,7 @@ class RetrievalDataset(Dataset):
         self.max_batch_size = params.max_batch_size
 
         self.captions= caption_dict
+        self.clager = clager
         self.ft_lgs= params.ft_lgs
         self.n_langs = params.n_langs
         self.max_vocab = params.max_vocab
@@ -339,6 +340,9 @@ class RetrievalDataset(Dataset):
         self.cc_num = 29
         self.sbu_num = 8
         self.sample_n = params.sample_n
+
+        self.sent_ratio = params.sent_ratio
+        self.word_ratio = params.word_ratio
 
         self.coco_len = 113287
         self.is_zh = False
@@ -477,7 +481,7 @@ class RetrievalDataset(Dataset):
             if is_zh:
                 image_ids = [str(ss, encoding="utf8") for ss in _image_ids]
             else:
-                image_ids = [ss for ss in _image_ids]
+                image_ids = [str(ss, encoding="utf8") for ss in _image_ids]
             wh = cur_file['wh'][:]
             num_boxes = cur_file['num_boxes'][:]
             boxes = cur_file['bbox'][:]
@@ -517,7 +521,8 @@ class RetrievalDataset(Dataset):
                 self.objects = h5py.File(path_file, 'r')["object"]
                 self.distribution = None
         elif self.mode == 'train' and self.image_ids is None:
-            self.image_ids = h5py.File(path_file, 'r')["image_id"]
+            _image_ids = h5py.File(path_file, 'r')["image_id"]
+            self.image_ids = [str(ss, encoding="utf8") for ss in _image_ids]
             self.wh = h5py.File(path_file, 'r')["wh"]
             self.num_boxes = h5py.File(path_file, 'r')["num_boxes"]
             self.boxes = h5py.File(path_file, 'r')["bbox"]
@@ -608,8 +613,9 @@ class RetrievalDataset(Dataset):
         sample_indices.insert(pos_label, sent_id // self.seq_per_img)
 
         for img_index in sample_indices:
+            sent.append(self.tokenize(self.clager.clag(self.raw_caps[sent_id], self.raw_langs[sent_id])))
             # assign same sentence with each image
-            sent.append(self.tokenize(self.raw_caps[sent_id]))
+            #sent.append(self.tokenize(self.raw_caps[sent_id]))
             langs.append(self.lang2id[self.raw_langs[sent_id]])
 
             att_feat, box_feat, img_mask, obj_label,img_id = self.get_img_feature(img_index)
@@ -647,17 +653,21 @@ class RetrievalDataset(Dataset):
 
         this_caption = self.raw_caps[sent_id]
         this_lang = self.lang2id[self.raw_langs[sent_id]]
+        tmp_lang = self.raw_langs[sent_id]
         all_neg_indices = self.all_cap_neg_indices
         neg_cap_ids = random.sample(all_neg_indices, sample_numbers - 1)
         neg_captions = [self.raw_caps[neg_idx] for neg_idx in neg_cap_ids]
+        neg_langs = [self.raw_langs[neg_idx] for neg_idx in neg_cap_ids]
         pos_label = random.randint(0, sample_numbers - 1)
         sample_captions = neg_captions
+        sample_langs = neg_langs
         sample_captions.insert(pos_label, this_caption)
+        sample_langs.insert(pos_label, tmp_lang)
 
         img_index = sent_id//self.seq_per_img
 
-        for cur_caption in sample_captions:  # sample captions
-            sent.append(self.tokenize(cur_caption))  # accumulate sentences
+        for cur_caption, cur_lang in zip(sample_captions, sample_langs):  # sample captions
+            sent.append(self.tokenize(self.clager.clag(cur_caption, cur_lang)))  # accumulate sentences
             langs.append(this_lang)
 
             att_feat, box_feat, img_mask, obj_label,img_id = self.get_img_feature(img_index)
@@ -837,7 +847,7 @@ class EvaluateCaptionDataset(Dataset):
         else:
             cur_file = h5py.File(filename, "r")
             _image_ids = cur_file['image_id'][:]
-            image_ids = [ss for ss in _image_ids]
+            image_ids = [str(ss, encoding="utf8") for ss in _image_ids]
             wh = cur_file['wh'][:]
             num_boxes = cur_file['num_boxes'][:]
             boxes = cur_file['bbox'][:]
@@ -1089,7 +1099,7 @@ class EvaluateRetrievalDataset(Dataset):
         else:
             cur_file = h5py.File(filename, "r")
             _image_ids = cur_file['image_id'][:]
-            image_ids = [ss for ss in _image_ids]
+            image_ids = [str(ss, encoding="utf8") for ss in _image_ids]
             wh = cur_file['wh'][:]
             num_boxes = cur_file['num_boxes'][:]
             boxes = cur_file['bbox'][:]

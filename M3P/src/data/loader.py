@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation. All rights reserved.
-# Licensed under the MIT License.
-#
 # Copyright (c) 2019-present, Facebook, Inc.
 # All rights reserved.
 #
@@ -15,7 +12,11 @@ import torch
 import gc
 from .dataset_finetune import CaptionDataset,RetrievalDataset,EvaluateCaptionDataset,EvaluateRetrievalDataset
 from .MILD_finetune import MILDCaptionDataset,MILDRetrievalDataset,MILDEvaluateRetrievalDataset,MILDEvaluateCaptionDataset
+from .dataset_pretrain import VLMPretrainRetrievalDataset,VLMPretrainCapDataset,StreamDataset
 from .MT_finetune import MTCaptionDataset,EvaluateMTCaptionDataset
+from .NTG_xlm_based import NTGParallelDataset
+from .SLIDE_finetune import SlideDataset
+from .clag import Clager
 import pandas as pd
 from .tokenization import XLMRTokenizer
 
@@ -28,9 +29,14 @@ def check_data_params(params):
     # data path
     assert os.path.isdir(params.data_path), params.data_path
 
+    def remove_empty(l):
+        return [x for x in l if x != ""]
+
     # check languages
-    params.langs = params.lgs.split('-') if params.lgs != 'debug' else ['en']
-    params.ft_lgs = params.ft_lgs.split('-') if params.ft_lgs != 'debug' else ['en']
+    params.langs = remove_empty(params.lgs.split('-') if params.lgs != 'debug' else ['en'])
+    params.ft_lgs = remove_empty(params.ft_lgs.split('-') if params.ft_lgs != 'debug' else ['en'])
+    params.ag_lgs = remove_empty(params.ag_lgs.split('-') if params.ag_lgs != 'debug' else ['en'])
+    params.src_lgs = remove_empty(params.src_lgs.split('-') if params.src_lgs != 'debug' else ['en'])
     assert len(params.langs) == len(set(params.langs)) >= 1
     # assert sorted(params.langs) == params.langs
     params.id2lang = {k: v for k, v in enumerate(sorted(params.langs))}
@@ -85,6 +91,7 @@ def check_data_params(params):
 
     # cross-modal steps
     params.cross_modal_steps = [tuple(s.split('-')) for s in params.cross_modal_steps.split(',') if len(s) > 0]
+    
     # cross-mass and cross-ae
     params.cross_mass_steps = [tuple(s.split('-')) for s in params.cross_mass_steps.split(',') if len(s) > 0]
     params.cross_ae_steps= [tuple(s.split('-')) for s in params.cross_ae_steps.split(',') if len(s) > 0]
@@ -94,6 +101,7 @@ def check_data_params(params):
     params.cross_mlm_steps = [tuple(s.split('-')) for s in params.cross_mlm_steps.split(',') if len(s) > 0]
     params.cross_mrm_steps = [tuple(s.split('-')) for s in params.cross_mrm_steps.split(',') if len(s) > 0]
     params.cross_mrfr_steps = [tuple(s.split('-')) for s in params.cross_mrfr_steps.split(',') if len(s) > 0]
+    params.cross_clcm_steps = [tuple(s.split('-')) for s in params.cross_clcm_steps.split(',') if len(s) > 0]
 
     # check that we can evaluate on BLEU
     assert params.eval_bleu is False or len(params.mt_steps + params.bt_steps + mass_steps) > 0
@@ -109,6 +117,7 @@ def check_data_params(params):
             for splt in ['train', 'valid']
         } for lang in params.langs if lang in required_mono
     }
+    [[print(p, os.path.isfile(p)) for p in paths.values()] for paths in params.mono_dataset.values()]
     assert all([all([os.path.isfile(p) for p in paths.values()]) for paths in params.mono_dataset.values()])
 
     #para dataset
@@ -143,7 +152,7 @@ def check_data_params(params):
     params.mask_index = tokenizer.mask_token_id
     params.n_words = tokenizer.vocab_size
 
-def load_captioning_data(params, data):
+def load_captioning_data(params, data, bilingual_dict):
     data['cross_modal'] = {}
     required_cross_modal_train = set(params.cross_modal_steps)#must need tasks
 
@@ -196,20 +205,20 @@ def load_captioning_data(params, data):
             # create ParallelDataset
 
             if params.is_generation:
-                # if params.is_pretrain:
-                #     dataset = VLMPretrainCapDataset(
-                #    captions=_captions,params=params,
-                #     mode=splt,data_type=src,
-                # )
-                # else:
-                if splt=='test':
-                    dataset =EvaluateCaptionDataset( captions=_captions,params=params,
-                mode=splt,data_type=src)
+                if params.is_pretrain:
+                    dataset = VLMPretrainCapDataset(
+                   captions=_captions, clager=Clager(bilingual_dict, params.sent_ratio, params.word_ratio),params=params,
+                    mode=splt,data_type=src,
+                )
                 else:
-                    dataset = CaptionDataset(
-                       captions=_captions,params=params,
-                        mode=splt,data_type=src,
-                    )
+                    if splt=='test':
+                        dataset =EvaluateCaptionDataset( captions=_captions,params=params,
+                    mode=splt,data_type=src)
+                    else:
+                        dataset = CaptionDataset(
+                           captions=_captions,params=params,
+                            mode=splt,data_type=src,
+                        )
 
             if splt != 'train':
                 dataset.tokens_per_batch = -1
@@ -227,7 +236,7 @@ def load_captioning_data(params, data):
 
     logger.info("")
 
-def load_retrieval_data(params, data):
+def load_retrieval_data(params, data, bilingual_dict):
     data['cross_modal'] = {}
     required_cross_modal_train = set(params.cross_rel_steps)  # must need tasks
 
@@ -272,20 +281,23 @@ def load_retrieval_data(params, data):
 
             # create ParallelDataset
             if params.is_understanding:
-
-                if splt=='test':
-                    if len(params.ft_lgs)>0:
-                        for lg in params.ft_lgs:
-                            dataset = EvaluateRetrievalDataset(caption_dict=_caption_dict, params=params,
-                                                           mode=splt, data_type=src,lang=lg)
-                            dataset.tokens_per_batch = -1
-                            data['cross_modal'][(src, tgt)]['test'][lg] = dataset
-                        # else:
-                        #     dataset = EvaluateRetrievalDataset(caption_dict=_caption_dict, params=params,
-                        #                            mode=splt, data_type=src)
-                else:
-                    dataset = RetrievalDataset(caption_dict=_caption_dict, params=params,
+                if params.is_pretrain: #google sbu
+                    dataset = VLMPretrainRetrievalDataset(captions=_captions, clager=Clager(bilingual_dict, params.sent_ratio, params.word_ratio), params=params,
                                            mode=splt, data_type=src)
+                else:
+                    if splt=='test':
+                        if len(params.ft_lgs)>0:
+                            for lg in params.ft_lgs:
+                                dataset = EvaluateRetrievalDataset(caption_dict=_caption_dict, params=params,
+                                                               mode=splt, data_type=src,lang=lg)
+                                dataset.tokens_per_batch = -1
+                                data['cross_modal'][(src, tgt)]['test'][lg] = dataset
+                            # else:
+                            #     dataset = EvaluateRetrievalDataset(caption_dict=_caption_dict, params=params,
+                            #                            mode=splt, data_type=src)
+                    else:
+                        dataset = RetrievalDataset(caption_dict=_caption_dict, clager=Clager(bilingual_dict, params.sent_ratio, params.word_ratio), params=params,
+                                               mode=splt, data_type=src)
 
             if splt != 'train':
                 dataset.tokens_per_batch = -1
@@ -305,7 +317,7 @@ def load_retrieval_data(params, data):
 
     logger.info("")
 
-def load_mt_data(params, data):
+def load_mt_data(params, data, bilingual_dict):
     data['cross_modal'] = {}
     required_cross_modal_train = set(params.cross_modal_steps)#must need tasks
 
@@ -366,7 +378,7 @@ def load_binarized(path, params):
     data = torch.load(path)
     return data
 
-def load_mono_data(params, data):
+def load_mono_data(params, data, bilingual_dict):
     """
     Load monolingual data.
     """
@@ -408,7 +420,7 @@ def load_mono_data(params, data):
 
     logger.info("")
 
-def load_mild_retrieval_data(params, data):
+def load_mild_retrieval_data(params, data, bilingual_dict):
     data['cross_modal'] = {}
     required_cross_modal_train = set(params.cross_rel_steps)  # must need tasks
 
@@ -472,7 +484,7 @@ def load_mild_retrieval_data(params, data):
 
     logger.info("")
 
-def load_mild_captioning_data(params, data):
+def load_mild_captioning_data(params, data, bilingual_dict):
     data['cross_modal'] = {}
     required_cross_modal_train = set(params.cross_modal_steps)#must need tasks
 
@@ -531,7 +543,112 @@ def load_mild_captioning_data(params, data):
 
     logger.info("")
 
-#only tex
+#only text
+def load_ntg_data(params, data, bilingual_dict):
+    data['text'] = {}
+    required_cross_modal_train = set(params.text_steps)#must need tasks
+
+    def read_text(file_name):
+        _out = []
+        with open(file_name) as f:
+            for line in f.readlines():
+                _out.append(line)
+        return _out
+
+    for lg,_ in required_cross_modal_train:
+        logger.info('============Text Generation data (%s)' % (lg))
+
+        data['text'][lg] = {}
+
+        for splt in ['train', 'valid', 'test']:
+            if params.is_master==False and splt == 'valid':
+                continue
+            if params.is_master==False and splt == 'test': # multi gpu only support retrieval evaluation
+                continue
+
+            # no need to load training data for evaluationpara
+            if splt == 'train' and params.eval_only:
+                continue
+
+            _bin_data = None
+            if splt=='train':
+                _bin_data = torch.load(os.path.join(params.data_path, 'NTG','NTG.en.train.pth'))
+                src_texts=None
+                tgt_texts=None
+                print(len(_bin_data['sent1']))
+            elif splt=='valid':
+                src_texts = read_text(os.path.join(params.data_path, 'NTG','xglue.ntg.%s.src.%s'%(lg,'dev')))
+                tgt_texts =read_text(os.path.join(params.data_path, 'NTG','xglue.ntg.%s.tgt.%s'%(lg,'dev')))
+                assert  len(src_texts)==len(tgt_texts)
+            else:
+                src_texts = read_text(os.path.join(params.data_path, 'NTG', 'xglue.ntg.%s.src.%s' % (lg, splt)))
+                tgt_texts = read_text(os.path.join(params.data_path, 'NTG', 'xglue.ntg.%s.tgt.%s' % (lg, splt)))
+                # src_texts = \
+                # pd.read_csv(os.path.join(params.data_path, 'NTG', 'xglue.ntg.%s.src.%s' % (lg, splt)), sep='\t',
+                #             header=None)[0].values.tolist()
+                # tgt_texts = \
+                # pd.read_csv(os.path.join(params.data_path, 'NTG', 'xglue.ntg.%s.tgt.%s' % (lg, splt)), sep='\t',
+                #             header=None)[0].values.tolist()
+                assert  len(src_texts)==len(tgt_texts)
+            # create ParallelDataset
+
+            dataset =NTGParallelDataset(captions_src=src_texts,captions_tgt=tgt_texts,params=params,
+            mode=splt,data_type='ntg',bin_data=_bin_data)
+
+            if splt != 'train':
+                dataset.tokens_per_batch = -1
+
+            data['text'][lg][splt] = dataset
+
+            logger.info("")
+
+    logger.info("")
+
+
+def load_slide_data(params, data, bilingual_dict):
+    data['cross_modal'] = {}
+    required_cross_modal_train = set(params.cross_rel_steps)  # must need tasks
+
+    for src, tgt in required_cross_modal_train:
+
+        logger.info('============ SLIDE data (%s-%s)' % (src, tgt))
+
+        assert (src, tgt) not in data['cross_modal']
+        data['cross_modal'][(src, tgt)] = {}
+
+        for splt in ['train', 'valid', 'test']:
+            if params.is_master == False and splt == 'test':
+                continue
+            if params.is_master == False and splt == 'valid':
+                continue
+            # no need to load training data for evaluationpara
+            if splt == 'train' and params.eval_only:
+                continue
+            # cap_path = params.cross_modal_dataset[(src, tgt)][splt]
+
+            _caption_dict = {}
+            lg='en'
+
+            if splt=='test':
+                _captions = pd.read_pickle(
+                    os.path.join(params.data_path, 'office/img_features', '%s_slide.new.pkl' % (splt)))
+            else:
+                _captions = pd.read_pickle(os.path.join(params.data_path, 'office/img_features', '%s_slide.pkl' % (splt)))
+
+            # create ParallelDataset
+            if params.is_understanding:
+                    dataset = SlideDataset(captions=_captions, params=params,
+                                           mode=splt, data_type=src)
+
+            if splt != 'train':
+                dataset.tokens_per_batch = -1
+
+            data['cross_modal'][(src, tgt)][splt] = dataset
+
+            logger.info("")
+
+    logger.info("")
+
 
 def load_data(params):
     """
@@ -544,22 +661,46 @@ def load_data(params):
     data = {}
     data['cross_modal'] = {}
     data['text'] = {}
-    data['mono_stream'] = {}
+
+    bilingual_dict = {}
+    if len(params.src_lgs)>0:
+        for lg1 in params.src_lgs:
+            bilingual_dict[lg1] = {}
+            for lg2 in params.ag_lgs:
+                if lg1 == lg2:
+                    continue
+                file_dir = os.path.join(params.data_path, 'dictionary', '%s-%s.txt' % (lg1,lg2))
+                with open(file_dir, encoding="utf8") as reader:
+                    lines = reader.readlines()
+                    for line in lines:
+                        try:
+                            src_word, tgt_word = line.strip().split("\t")
+                        except:
+                            src_word, tgt_word = line.strip().split(" ")
+                        if src_word not in bilingual_dict[lg1]:
+                            bilingual_dict[lg1][src_word] = {}
+                        if lg2 not in bilingual_dict[lg1][src_word]:
+                            bilingual_dict[lg1][src_word][lg2] = []
+                        bilingual_dict[lg1][src_word][lg2].append(tgt_word)
 
     if params.is_understanding:
         if params.is_mild:
-            load_mild_retrieval_data(params,data)
+            load_mild_retrieval_data(params,data,bilingual_dict)
+        elif params.is_slide:
+            load_slide_data(params,data,bilingual_dict)
         else:
-            load_retrieval_data(params,data)
+            load_retrieval_data(params,data,bilingual_dict)
     if params.is_generation:
         if params.is_mild:
-            load_mild_captioning_data(params,data)
+            load_mild_captioning_data(params,data,bilingual_dict)
         elif params.is_mt:
-            load_mt_data(params,data)
+            load_mt_data(params,data,bilingual_dict)
+        elif params.is_ntg:
+            load_ntg_data(params,data,bilingual_dict)
         else:
-            load_captioning_data(params,data)
+            load_captioning_data(params,data,bilingual_dict)
 
-    # load_mono_data(params,data)
+    load_mono_data(params,data,bilingual_dict)
 
     # monolingual data summary
     logger.info('============ Data summary')
@@ -575,7 +716,11 @@ def load_data(params):
                 logger.info('{: <18} - {: >5} - {: >12}:{: >10}'.format('CrossModal data for captioning', data_set, '%s-%s' % (src, tgt),
                                                                     len(v[data_set])))
             elif params.is_understanding:
-                if data_set=='test' and len(params.ft_lgs)>0 and params.is_pretrain==False and params.is_mild==False:
+                if params.is_slide:
+                    logger.info('{: <18} - {: >5} - {: >12}:{: >10}'.format('CrossModal data for slide', data_set,
+                                                                            '%s-%s' % (src, tgt),
+                                                                            len(v[data_set])))
+                elif data_set=='test' and len(params.ft_lgs)>0 and params.is_pretrain==False and params.is_mild==False:
                     for lg in params.ft_lgs:
                         logger.info('{: <18} - {: >5} - {: >12}:{: >10}'.format('Cross-lingual CrossModal data for retrieval', data_set,
                                                                                 '%s-%s-lg:%s' % (src, tgt,lg),

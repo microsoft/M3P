@@ -36,7 +36,7 @@ def get_parser():
     # main parameters
     parser.add_argument("--dump_path", type=str, default="/tmp/dumped/",
                         help="Experiment dump path")
-    parser.add_argument("--exp_name", type=str, default="M3P",
+    parser.add_argument("--exp_name", type=str, default="XGPT",
                         help="Experiment name")
     parser.add_argument("--save_periodic", type=int, default=0,
                         help="Save the model periodically (0 to disable)")
@@ -54,13 +54,13 @@ def get_parser():
                         help="Only use english domain (equal to only use one language)")
 
     # model parameters
-    parser.add_argument("--emb_dim", type=int, default=768,
+    parser.add_argument("--emb_dim", type=int, default=1024,
                         help="Embedding layer size")
     parser.add_argument("--n_layers", type=int, default=12,
                         help="Number of Transformer layers")
     parser.add_argument("--n_dec_layers", type=int, default=-1,
                         help="Number of Decoder Transformer layers")
-    parser.add_argument("--n_heads", type=int, default=12,
+    parser.add_argument("--n_heads", type=int, default=8,
                         help="Number of Transformer heads")
     parser.add_argument("--dropout", type=float, default=0.1,
                         help="Dropout")
@@ -111,10 +111,13 @@ def get_parser():
                         help="Data path")
     parser.add_argument("--lgs", type=str, default="en",
                         help="Languages (lg1-lg2-lg3 .. ex: en-fr-es-de)")
+    parser.add_argument("--src_lgs", type=str, default="en",
+                        help="Languages (lg1-lg2-lg3 .. ex: en-fr-es-de)")
+    parser.add_argument("--ag_lgs", type=str, default="en",
+                        help="Languages (lg1-lg2-lg3 .. ex: en-fr-es-de)")
     parser.add_argument("--lg_sampling_factor", type=float, default=-1,
                         help="Language sampling factor")
 
-    #path for
     parser.add_argument("--vocab_path", type=str, default="",
                         help="bpe vocab for en")
     parser.add_argument("--input_fea_dir", type=str, default="",
@@ -128,6 +131,8 @@ def get_parser():
     parser.add_argument("--flicker_path", type=str, default="",
                         help="path to flickr")
     parser.add_argument("--mild_path", type=str, default="",
+                        help="path to mild")
+    parser.add_argument("--slide_path", type=str, default="",
                         help="path to mild")
     parser.add_argument("--max_vocab", type=int, default=-1,
                         help="Maximum vocabulary size (-1 to disable)")
@@ -145,7 +150,7 @@ def get_parser():
                         help="Sequence length")
     parser.add_argument("--min_len", type=int, default=2,
                         help="Minimum length of sentences (after BPE)")
-    parser.add_argument("--max_len", type=int, default=128,
+    parser.add_argument("--max_len", type=int, default=60,
                         help="Maximum length of sentences (after BPE)")
     parser.add_argument("--group_by_size", type=bool_flag, default=True,
                         help="Sort sentences by size during the training")
@@ -154,7 +159,6 @@ def get_parser():
                         help="Maximum number of sentences per batch (used in combination with tokens_per_batch, 0 to disable)")
     parser.add_argument("--tokens_per_batch", type=int, default=-1,
                         help="Number of tokens per batch")
-
 
     # batch parameters
     parser.add_argument("--split_data", type=bool_flag, default=False,
@@ -201,7 +205,7 @@ def get_parser():
                         help="image to text coefficient")
 
     # training steps base steps
-    #not support currently
+    # not support currently
     parser.add_argument("--clm_steps", type=str, default="",
                         help="Causal prediction steps (CLM)")
     parser.add_argument("--mlm_steps", type=str, default="",
@@ -217,7 +221,7 @@ def get_parser():
     parser.add_argument("--pc_steps", type=str, default="",
                         help="Parallel classification steps")
 
-    # for generation step
+    # for cross-modal step
     parser.add_argument("--cross_modal_steps", type=str, default="",
                         help="ic steps")
     parser.add_argument("--cross_mass_steps", type=str, default="",
@@ -227,7 +231,7 @@ def get_parser():
     parser.add_argument("--cross_gan_steps", type=str, default="",
                         help="tifg steps")
 
-    #for understanding step
+    # for understanding step
     parser.add_argument("--cross_rel_steps", type=str, default="",
                         help="uvl relation steps")
     parser.add_argument("--cross_mlm_steps", type=str, default="",
@@ -236,8 +240,10 @@ def get_parser():
                         help="mask region steps")
     parser.add_argument("--cross_mrfr_steps", type=str, default="",
                         help="mrfr steps")
+    parser.add_argument("--cross_clcm_steps", type=str, default="",
+                        help="ic steps")
 
-    #text only step
+    # text only step
     parser.add_argument("--text_steps", type=str, default="",
                         help="text steps ")
 
@@ -260,8 +266,6 @@ def get_parser():
                         help="Evaluate BLEU score during MT training")
     parser.add_argument("--eval_only", type=bool_flag, default=False,
                         help="Only run evaluations")
-    parser.add_argument("--eval_caption", type=bool_flag, default=False,
-                        help="Evaluate BLEU and CIDEr for captioning")
 
     # debug
     parser.add_argument("--debug_train", type=bool_flag, default=False,
@@ -278,7 +282,7 @@ def get_parser():
                         help="Master port (for multi-node SLURM jobs)")
 
     # AoA Model
-    parser.add_argument("--refine_image", type=bool_flag, default=False,
+    parser.add_argument("--refine_image", type=bool_flag, default=True,
                         help="If use refine module after image embedding")
     parser.add_argument("--refine_layers", type=int, default=6,
                         help="refine_layers for refine module")
@@ -286,7 +290,7 @@ def get_parser():
                         help="If use refine module after image encoder")
 
     parser.add_argument("--use_noise", type=bool_flag, default=False,
-                    help="whether use noise bart mask for autoencoder ")
+                        help="whether use noise bart mask for autoencoder ")
 
     parser.add_argument("--accumulate_gradients", type=int, default=-1,
                         help="accumulated gradients during trianing")
@@ -294,7 +298,6 @@ def get_parser():
                         help="Use AMP wrapper for float16 / distributed / gradient accumulation. Level of optimization. -1 to disable.")
     parser.add_argument("--use_memory", type=int, default=0,
                         help="Use externel memory")
-
 
     parser.add_argument("--is_cross_modal", type=bool_flag, default=True,
                         help="If use one stream fro image and text")
@@ -310,8 +313,7 @@ def get_parser():
     parser.add_argument("--use_enc_att", type=bool_flag, default=False,
                         help="If use encoder-decoder framework for understanding tasks")
 
-
-    parser.add_argument("--save_every_epoch", type=int, default=5,
+    parser.add_argument("--save_every_epoch", type=int, default=1,
                         help="how many epoches for saving")
 
     parser.add_argument("--multi_reload_model", type=str,
@@ -320,9 +322,13 @@ def get_parser():
 
     parser.add_argument("--bin_cls_loss_weight", type=float, default=1,
                         help="the weight of binary classification loss when  finetining")
-    parser.add_argument("--multi_cls_loss_weight", type=float, default=0,
+    parser.add_argument("--multi_cls_loss_weight", type=float, default=1,
                         help="the weight of multiple classification loss when finetining")
-    parser.add_argument("--sample_n", type=int, default=4,
+    parser.add_argument("--sent_ratio", type=float, default=0,
+                        help="ratio of sent selection")
+    parser.add_argument("--word_ratio", type=float, default=0,
+                        help="ratio of word selection")
+    parser.add_argument("--sample_n", type=int, default=2,
                         help="number of samples during retrieval")
     parser.add_argument("--t2i_flag", type=bool_flag, default=True,
                         help="whether sample text 2 image")
@@ -331,7 +337,7 @@ def get_parser():
     parser.add_argument("--coco_method", type=str,
                         default="CIDEr",
                         help="which evaluation metric selection for coco evaluate")
-    parser.add_argument("--eval_n", type=int, default=100,
+    parser.add_argument("--eval_n", type=int, default=150,
                         help="n_sentences for evaluation,including retrieval and generation")
     parser.add_argument("--eval_images", type=int, default=-1,
                         help="n_images for evaluation retrieval")
@@ -344,7 +350,7 @@ def get_parser():
     parser.add_argument("--use_new_fea", type=bool_flag, default=False,
                         help="whether use old version pythia")
     parser.add_argument("--eval_path", type=str, default="/tmp/dumped/",
-                    help="Experiment results path")
+                        help="Experiment results path")
     parser.add_argument("--google_valid_path", type=str, default="./data/google_captions",
                         help="path to CC")
     parser.add_argument("--train_order_path", type=str, default="./data/",
@@ -356,6 +362,12 @@ def get_parser():
     parser.add_argument("--ft_lgs", type=str, default="en-fr-de",
                         help="Languages for downstream tasks")
 
+    parser.add_argument("--is_latent", type=bool_flag, default=False,
+                        help="whether use latent space to adjust embedding")
+    parser.add_argument("--kld_alpha", type=float, default=1,
+                        help="the param for kl loss")
+    parser.add_argument("--rec_alpha", type=float, default=1,
+                        help="the param for reconstruct loss")
     parser.add_argument("--is_mild", type=bool_flag, default=False,
                         help="whether use mild data ")
     parser.add_argument("--qp_type", type=str, default="q",
@@ -368,7 +380,14 @@ def get_parser():
                         help="whether mmt generation only use text ")
     parser.add_argument("--is_ntg", type=bool_flag, default=False,
                         help="whether ntg task ")
-
+    parser.add_argument("--is_slide", type=bool_flag, default=False,
+                        help="whether mmt generation ")
+    parser.add_argument("--is_freelb", type=bool_flag, default=False,
+                        help="whether use freelb ")
+    parser.add_argument("--free_text", type=bool_flag, default=False,
+                        help="whether use freelb ")
+    parser.add_argument("--free_img", type=bool_flag, default=False,
+                        help="whether use freelb ")
     return parser
 
 
@@ -387,12 +406,14 @@ def main(params):
     print(data)
 
     # build model
-    # if params.encoder_only:
-    model = build_model(params)
+    if params.encoder_only:
+        model = build_model(params)
+    else:
+        encoder, decoder = build_model(params)
 
     # build trainer, reload potential checkpoints / build evaluator
 
-    trainer = XTrainer(model,data,params)
+    trainer = XTrainer(model, data, params)
     evaluator = XEvaluator(trainer, data, params)
     # evaluation
     if params.eval_only:
@@ -419,15 +440,46 @@ def main(params):
                 if params.is_understanding:
                     trainer.mlm_step(lang1, lang2, params.lambda_mlm)
 
+            for lang1, lang2 in shuf_order(params.text_steps, params):
+                if params.is_ntg:
+                    trainer.ntg_step(lang1, None, params.lambda_mlm)
+
             # cross-modal caption steps
             for lang1, lang2 in shuf_order(params.cross_modal_steps, params):
                 if params.is_mt:
-                    trainer.mt_ic_step(lang1,lang2,params.lambda_ic)
+                    trainer.mt_ic_step(lang1, lang2, params.lambda_ic)
                 else:
                     trainer.ic_step(lang1, lang2, params.lambda_ic)
 
+                if params.is_freelb:
+                    trainer.free_lb_ic_step(lang1, lang2, params.lambda_ic)
+
+            for lang1, lang2 in shuf_order(params.mlm_steps, params, n=3):
+                if params.is_generation:
+                    trainer.bart_mlm_step(lang1, lang2, params.lambda_imlm)
+                    trainer.bart_mass_step(lang1, lang2, params.lambda_imlm)
+
+            for lang1, lang2 in shuf_order(params.cross_ae_steps, params):
+                trainer.bart_img_step(lang1, lang2, params.lambda_ida)
+
             for lang1, lang2 in shuf_order(params.cross_rel_steps, params):
-                trainer.rel_step(lang1, lang2, params.lambda_t2i, params.lambda_i2t)
+                if params.is_pretrain:
+                    trainer.pretrain_rel_step(lang1, lang2)
+                else:
+                    if params.is_slide:
+                        trainer.slide_step(lang1, lang2, params.lambda_t2i)
+                    else:
+                        # support multi languages
+                        trainer.rel_step(lang1, lang2, params.lambda_t2i, params.lambda_i2t)
+
+            # for lang1, lang2 in shuf_order(params.cross_mlm_steps, params):
+            #     trainer.mlm_step(lang1, lang2, params.lambda_mlm)
+            #
+            # for lang1, lang2 in shuf_order(params.cross_mrm_steps, params):
+            #     trainer.mrm_step(lang1, lang2, params.lambda_mrm)
+            #
+            # for lang1, lang2 in shuf_order(params.cross_mrfr_steps, params):
+            #     trainer.mrfr_step(lang1, lang2, params.lambda_mrfr)
 
             trainer.iter()
 

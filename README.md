@@ -1,9 +1,9 @@
 
 # M3P
 
-This repo provides the code of [M3P](https://arxiv.org/pdf/2006.02635.pdf), a Multitask Multilingual Multimodal Pre-trained model that combines multilingual-monomodal pre-training and monolingual-multimodal pre-training into a unified framework. The model learns universal representations that can map objects that occurred in different modalities or expressed in different languages to vectors in a common semantic space. To verify the generalization capability of M3P, the pre-trained model can be applied for different types of downstream tasks: [multilingual image-text retrieval](#multilingual-image-text-retrieval), [multilingual image captioning](#multilingual-image-captioning), [multimodal machine translation](#multimodal-machine-translation), multilingual natural language inference and multilingual text generation.
+This repo provides the code of [M3P](https://arxiv.org/pdf/2006.02635.pdf), a Multitask Multilingual Multimodal Pre-trained model that combines multilingual pre-training and multimodal pre-training into a unified framework via multitask pre-training. Our goal is to learn universal representations that can map objects occurred in different modalities or texts expressed in different languages into a common semantic space. In addition, to explicitly encourage fine-grained alignment between images and non-English languages, we also propose Multimodal Code-switched Training (MCT) to combine monolingual pre-training and multimodal pre-training via a code-switch strategy. Experiments are performed on the [multilingual image-text retrieval](#multilingual-image-text-retrieval) across two benchmark datasets, including MSCOCO and Multi30K. M3P can achieve comparable results for English and new state-of-the-art results for non-English languages.
 
-![img](M3P/figs/MMMP.png)
+![img](M3P/figs/Overview.png)
 
 # Install and Dependency
 
@@ -13,14 +13,12 @@ This repo provides the code of [M3P](https://arxiv.org/pdf/2006.02635.pdf), a Mu
 - fastBPE (for BPE codes)
 - Apex (for fp16 training)
 - SentencePiece
-- sacrebleu (for generation evaluation)
 
 # Data Ready
 
 Including datasets:
 - [x] Multi30K 
 - [x] MSCOCO 
-- [ ] MILD (*It will be released later.)
 
 If you use these resources in your research, please consider citing the following papers:
 
@@ -128,10 +126,7 @@ The meta-data is a pickle file about mapping dictionary for image_id and caption
 
 # Pre-trained Models
 
-| Task | Pre-trained Model |
-|-----------|:-----------------:|
-| Understanding   | [MODEL](https://unicoderrelease.blob.core.windows.net/m3p/m3p_under_weights.tar.gz)    |
-| Generiation   | [MODEL](https://unicoderrelease.blob.core.windows.net/m3p/m3p_gen_weights.tar.gz)    |
+You can download the pre-trained model from [this link](https://haohua.blob.core.windows.net/minheng/UVL_EXP/UVL_XVL/z3o7zmnowz/checkpoint.pth?sv=2020-04-08&st=2021-05-13T06%3A35%3A03Z&se=2099-12-31T06%3A35%3A00Z&sr=b&sp=r&sig=6bfXa46W3ih1U23J0sgdOAZPk37YFcnpmeCYMj6rnqY%3D).
 
 Same with XLM-R, XLM-R handles the following 100 languages: Afrikaans, Albanian, Amharic, Arabic, Armenian, Assamese, Azerbaijani, Basque, Belarusian, Bengali, Bengali Romanized, Bosnian, Breton, Bulgarian, Burmese, Burmese, Catalan, Chinese (Simplified), Chinese (Traditional), Croatian, Czech, Danish, Dutch, English, Esperanto, Estonian, Filipino, Finnish, French, Galician, Georgian, German, Greek, Gujarati, Hausa, Hebrew, Hindi, Hindi Romanized, Hungarian, Icelandic, Indonesian, Irish, Italian, Japanese, Javanese, Kannada, Kazakh, Khmer, Korean, Kurdish (Kurmanji), Kyrgyz, Lao, Latin, Latvian, Lithuanian, Macedonian, Malagasy, Malay, Malayalam, Marathi, Mongolian, Nepali, Norwegian, Oriya, Oromo, Pashto, Persian, Polish, Portuguese, Punjabi, Romanian, Russian, Sanskri, Scottish, Gaelic, Serbian, Sindhi, Sinhala, Slovak, Slovenian, Somali, Spanish, Sundanese, Swahili, Swedish, Tamil, Tamil Romanized, Telugu, Telugu Romanized, Thai, Turkish, Ukrainian, Urdu, Urdu Romanized, Uyghur, Uzbek, Vietnamese, Welsh, Western, Frisian, Xhosa, Yiddish.
 
@@ -148,7 +143,6 @@ $EXP_NAME: name your experiment
 $MODELS: path to store models
 $VOCAB_PATH: path to the vocab file
 $FEA_PATH: path to the image features
-$MILD_PATH: subdirectory of the image features for MILD dataset
 $EVAL_PATH: path to save evaluation results
 ```
 
@@ -166,21 +160,60 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --dump_path $MODELS \
     --exp_name $EXP_NAME \
     --batch_size 24 \
+    --emb_dim 768 \
+    --n_layers 12 \
+    --n_heads 12 \
+    --n_dec_layers -1 \
+    --dropout 0.1 \
+    --attention_dropout 0.1 \
+    --gelu_activation True \
     --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
+    --lgs $ALL_LGS \
     --data_path $DATA_PATH \
     --vocab_path $VOCAB_PATH \
-    --mild_path $MILD_PATH \
-    --cross_rel_steps 'coco' \
-    --epoch_size 100000 \
-    --max_epoch 10 \
-    --max_len 128 \
-    --accumulate_gradients 8 \
+    --google_path 'google_captions/obj100' \
+    --sbu_path 'google_captions/obj100' \
+    --coco_path coco \
+    --flicker_path flicker \
+    --cross_rel_steps coco-img \
+    --mlm_steps '' \
+    --epoch_size 150000 \
+    --max_epoch 150 \
+    --bptt 128 \
+    --max_len 64 \
+    --fp16 True \
+    --validation_metrics valid_I2T_acc,valid_T2I_acc \
+    --max_region_num 100 \
+    --accumulate_gradients 4 \
+    --amp 1 \
+    --refine_image False \
+    --refine_encoder False \
     --input_fea_dir $FEA_PATH \
+    --save_every_epoch 5 \
+    --is_generation False \
     --is_understanding True \
+    --is_pretrain False \
+    --use_new_fea True \
+    --t2i_flag True \
+    --i2t_flag True \
+    --eval_n 50 \
+    --sent_ratio 0.8 \
+    --word_ratio 0.8 \
+    --seq_per_img 5 \
+    --eval_images -1 \
+    --sample_n 4 \
+    --multi_cls_loss_weight 0 \
+    --bin_cls_loss_weight 1 \
     --num_workers 4 \
     --eval_path $EVAL_PATH \
+    --google_valid_path $CC_VALID_PATH \
+    --train_order_path $ORDER_PATH \
+    --cross_lingual_path $CROSS_LINGUAL_PATH \
     --ft_lgs 'en' \
+    --src_lgs 'en' \
+    --ag_lgs ''\
     --eval_only False \
+    --is_freelb False
 ```
 
 ### Fine-tune Flickr Multi30K
@@ -193,170 +226,61 @@ python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_pa
     --dump_path $MODELS \
     --exp_name $EXP_NAME \
     --batch_size 24 \
+    --emb_dim 768 \
+    --n_layers 12 \
+    --n_heads 12 \
+    --n_dec_layers -1 \
+    --dropout 0.1 \
+    --attention_dropout 0.1 \
+    --gelu_activation True \
     --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
+    --lgs $ALL_LGS \
     --data_path $DATA_PATH \
     --vocab_path $VOCAB_PATH \
-    --mild_path $MILD_PATH \
-    --cross_rel_steps 'flicker' \
-    --epoch_size 100000 \
-    --max_epoch 10 \
-    --max_len 128 \
-    --accumulate_gradients 8 \
-    --input_fea_dir $FEA_PATH \
-    --is_understanding True \
-    --num_workers 4 \
-    --eval_path $EVAL_PATH \
-    --ft_lgs 'en' \
-    --eval_only False \
-```
-
-On MILD benchmark we fine-tune M3P with below two settings.
-
-### Fine-tune MILD based on Q-I pairs
-
-This is to fine-tune pre-trained understanding model without using image contexts (taking fine-tune on English as an example):
-
-```
-python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_path $DATA_PATH \
-    --reload_model $RELOAD \
-    --dump_path $MODELS \
-    --exp_name $EXP_NAME \
-    --batch_size 24 \
-    --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
-    --data_path $DATA_PATH \
-    --vocab_path $VOCAB_PATH \
-    --mild_path $MILD_PATH \
-    --cross_rel_steps 'mild-img' \
-    --epoch_size 100000 \
-    --max_epoch 10 \
-    --max_len 128 \
-    --accumulate_gradients 8 \
-    --input_fea_dir $FEA_PATH \
-    --is_understanding True \
-    --num_workers 4 \
-    --eval_path $EVAL_PATH \
-    --ft_lgs 'en' \
-    --eval_only False \
-    --is_mild True \
-    --qp_type 'q' \
-    --seq_per_img 1 \
-```
-### Fine-tune MILD based on Q-I-C triples
-
-This is to fine-tune pre-trained understanding model where each image and its context always appear together as input (taking fine-tune on English as an example):
-
-```
-python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_path $DATA_PATH \
-    --reload_model $RELOAD \
-    --dump_path $MODELS \
-    --exp_name $EXP_NAME \
-    --batch_size 24 \
-    --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
-    --data_path $DATA_PATH \
-    --vocab_path $VOCAB_PATH \
-    --mild_path $MILD_PATH \
-    --cross_rel_steps 'mild-img' \
-    --epoch_size 100000 \
-    --max_epoch 10 \
-    --max_len 128 \
-    --accumulate_gradients 8 \
-    --input_fea_dir $FEA_PATH \
-    --is_understanding True \
-    --num_workers 4 \
-    --eval_path $EVAL_PATH \
-    --ft_lgs 'en' \
-    --eval_only False \
-    --is_mild True \
-    --qp_type 'qp' \
-    --seq_per_img 1 \
-```            
-
-## Multilingual image captioning
-
-The task of multilingual image captioning is to generate captions in specific languages given input images. We evaluate M3P on Multi30K and MSCOCO.
-
-```
-python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_path $DATA_PATH \
-    --reload_model $RELOAD \
-    --dump_path $MODELS \
-    --exp_name $EXP_NAME \
-    --batch_size 24 \
-    --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
-    --data_path $DATA_PATH \
-    --vocab_path $VOCAB_PATH \
-    --mild_path $MILD_PATH \
-    --cross_modal_steps 'flicker-img' \
-    --epoch_size 100000 \
-    --max_epoch 25 \
-    --max_len 128 \
-    --accumulate_gradients 8 \
-    --input_fea_dir $FEA_PATH \
-    --is_generation True \
-    --num_workers 4 \
-    --eval_path $EVAL_PATH \
-    --ft_lgs $LG \
-    --eval_only False \
-    --beam_size 10 \
-```      
-
-```
-python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_path $DATA_PATH \
-    --reload_model $RELOAD \
-    --dump_path $MODELS \
-    --exp_name $EXP_NAME \
-    --batch_size 32 \
-    --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
-    --data_path $DATA_PATH \
-    --vocab_path $VOCAB_PATH \
-    --mild_path $MILD_PATH \
-    --cross_modal_steps 'coco-img' \
-    --epoch_size 100000 \
-    --max_epoch 25 \
-    --max_len 128 \
+    --google_path 'google_captions/obj100' \
+    --sbu_path 'google_captions/obj100' \
+    --coco_path coco \
+    --flicker_path flicker \
+    --cross_rel_steps flicker-img \
+    --mlm_steps '' \
+    --epoch_size 150000 \
+    --max_epoch 150 \
+    --bptt 128 \
+    --max_len 64 \
+    --fp16 True \
+    --validation_metrics valid_I2T_acc,valid_T2I_acc \
+    --max_region_num 100 \
     --accumulate_gradients 4 \
+    --amp 1 \
+    --refine_image False \
+    --refine_encoder False \
     --input_fea_dir $FEA_PATH \
-    --is_generation True \
+    --save_every_epoch 5 \
+    --is_generation False \
+    --is_understanding True \
+    --is_pretrain False \
+    --use_new_fea True \
+    --t2i_flag True \
+    --i2t_flag True \
+    --eval_n 50 \
+    --sent_ratio 0.8 \
+    --word_ratio 0.8 \
+    --seq_per_img 5 \
+    --eval_images -1 \
+    --sample_n 4 \
+    --multi_cls_loss_weight 0 \
+    --bin_cls_loss_weight 1 \
     --num_workers 4 \
     --eval_path $EVAL_PATH \
-    --ft_lgs $LG \
+    --google_valid_path $CC_VALID_PATH \
+    --train_order_path $ORDER_PATH \
+    --cross_lingual_path $CROSS_LINGUAL_PATH \
+    --ft_lgs 'en' \
+    --src_lgs 'en' \
+    --ag_lgs ''\
     --eval_only False \
-    --beam_size 10 \
-```      
-
-For generation evaluation, you can refer this https://github.com/salaniz/pycocoevalcap or 
-follow scareblue command line :
-```  
-python -m sacrebleu --force -lc -l lg-lg ref.txt < pred.txt
-```  
-
-## Multimodal machine translation
-
-The task of multimodal machine translation is to generate sentences in target languages given source sentences together with related images as complementary information. We evaluate M3P on Multi30K. 
-
+    --is_freelb False
 ```
-python -m torch.distributed.launch --nproc_per_node=$NGPU ./train_x.py --data_path $DATA_PATH \
-    --reload_model $RELOAD \
-    --dump_path $MODELS \
-    --exp_name $EXP_NAME \
-    --batch_size 24 \
-    --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.00005 \
-    --data_path $DATA_PATH \
-    --vocab_path $VOCAB_PATH \
-    --mild_path $MILD_PATH \
-    --cross_modal_steps 'flicker-img' \
-    --epoch_size 100000 \
-    --max_epoch 25 \
-    --max_len 128 \
-    --accumulate_gradients 8 \
-    --input_fea_dir $FEA_PATH \
-    --is_generation True \
-    --num_workers 4 \
-    --eval_path $EVAL_PATH \
-    --ft_lgs 'en-de' \
-    --eval_only False \
-    --beam_size 10 \
-    --is_mt True \
-```      
 
 # How to cite
 
@@ -365,7 +289,7 @@ If you find M3P useful in your work, you can cite the paper as below:
 ```
 @article{huang2020m3p,
   title={M3P: Learning Universal Representations via Multitask Multilingual Multimodal Pre-training},
-  author={Haoyang Huang and Lin Su and Di Qi and Nan Duan and Edward Cui and Taroon Bharti and Lei Zhang and Lijuan Wang and Jianfeng Gao and Bei Liu and Jianlong Fu and Dongdong Zhang and Xin Liu and Ming Zhou},
+  author={Minheng Ni and Haoyang Huang and Lin Su and Edward Cui and Taroon Bharti and Lijuan Wang and Jianfeng Gao and Dongdong Zhang and Nan Duan},
   journal={arXiv},
   year={2020},
   volume={abs/2006.02635}
